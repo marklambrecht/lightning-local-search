@@ -1,99 +1,176 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
+import { Notice, Plugin } from "obsidian";
+import type { AISearchSettings } from "./types";
+import { COMMAND_IDS, DEFAULT_SETTINGS, VIEW_TYPE_AI_SEARCH } from "./constants";
+import { AISearchSettingTab } from "./settings";
+import { OramaIndex } from "./indexer/orama-index";
+import { VaultIndexer } from "./indexer/vault-indexer";
+import { IncrementalSync } from "./indexer/incremental-sync";
+import { IndexStore } from "./storage/index-store";
+import { CacheManager } from "./storage/cache-manager";
+import { SearchModal } from "./ui/search-modal";
+import { AISearchView } from "./ui/search-view";
+import { AuditLog } from "./claude/audit-log";
+import { EmbeddingService } from "./embeddings/embedding-service";
+import { EmbeddingWorker } from "./embeddings/embedding-worker";
 
-// Remember to rename these classes and interfaces!
+export default class AISearchPlugin extends Plugin {
+	settings: AISearchSettings = { ...DEFAULT_SETTINGS };
+	oramaIndex: OramaIndex = new OramaIndex();
+	auditLog: AuditLog | null = null;
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+	private vaultIndexer!: VaultIndexer;
+	private incrementalSync!: IncrementalSync;
+	private indexStore!: IndexStore;
+	private cacheManager!: CacheManager;
+	private embeddingService: EmbeddingService | null = null;
+	private embeddingWorker: EmbeddingWorker | null = null;
 
-	async onload() {
+	async onload(): Promise<void> {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
+		// Register view type early so Obsidian can restore it from layout
+		this.registerView(
+			VIEW_TYPE_AI_SEARCH,
+			(leaf) => new AISearchView(leaf, this),
+		);
+
+		// Settings tab
+		this.addSettingTab(new AISearchSettingTab(this.app, this));
+
+		// Ribbon icon
+		this.addRibbonIcon("search", "AI search", () => {
+			this.openSearchModal();
 		});
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
-
-		// This adds a simple command that can be triggered anywhere
+		// Commands
 		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
+			id: COMMAND_IDS.openSearch,
+			name: "Open search",
+			callback: () => this.openSearchModal(),
 		});
-		// This adds an editor command that can perform some operation on the current editor instance
+
 		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
+			id: COMMAND_IDS.openSidebar,
+			name: "Open search sidebar",
+			callback: () => void this.activateSidebarView(),
 		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
+
 		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-				return false;
-			}
+			id: COMMAND_IDS.reindex,
+			name: "Re-index vault",
+			callback: () => void this.triggerReindex(),
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
+		// Deferred initialization
+		this.app.workspace.onLayoutReady(() => {
+			void this.initializeServices();
 		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-
 	}
 
-	onunload() {
+	onunload(): void {
+		this.embeddingWorker?.cancel();
+		this.embeddingService?.dispose();
 	}
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
+	async loadSettings(): Promise<void> {
+		this.settings = Object.assign(
+			{},
+			DEFAULT_SETTINGS,
+			(await this.loadData()) as Partial<AISearchSettings> | undefined,
+		);
 	}
 
-	async saveSettings() {
+	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
 	}
-}
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
+	private async initializeServices(): Promise<void> {
+		this.vaultIndexer = new VaultIndexer(
+			this.app,
+			this.settings.excludedFolders,
+		);
+		this.indexStore = new IndexStore();
+
+		const vaultId = IndexStore.getVaultId(this.app.vault.getName());
+		this.cacheManager = new CacheManager(
+			this.oramaIndex,
+			this.vaultIndexer,
+			this.indexStore,
+			vaultId,
+		);
+
+		// Initialize index (load from cache or rebuild)
+		if (this.settings.indexOnStartup) {
+			const status = await this.cacheManager.initialize();
+			new Notice(`AI search: indexed ${status.documentCount} notes`);
+		}
+
+		// Register file watchers for incremental sync
+		this.incrementalSync = new IncrementalSync(
+			this,
+			this.oramaIndex,
+			this.vaultIndexer,
+			() => {
+				void this.cacheManager.persistIndex();
+			},
+		);
+		this.incrementalSync.register();
+
+		// Initialize audit log (Phase 5)
+		if (this.settings.auditLogEnabled) {
+			this.auditLog = new AuditLog();
+		}
+
+		// Initialize embedding service (Phase 4 — desktop only)
+		if (this.settings.enableEmbeddings) {
+			this.embeddingService = new EmbeddingService();
+			if (this.embeddingService.isAvailable) {
+				await this.embeddingService.initialize(
+					this.settings.embeddingModel,
+				);
+				this.embeddingWorker = new EmbeddingWorker(
+					this.app,
+					this.embeddingService,
+					this.indexStore,
+					this.settings.embeddingBatchSize,
+				);
+				void this.embeddingWorker.processAll();
+			}
+		}
 	}
 
-	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
+	private openSearchModal(): void {
+		new SearchModal(
+			this.app,
+			this.oramaIndex,
+			this.settings.maxResults,
+			this.settings.showScores,
+			this.settings.excerptLength,
+			this.settings.enableFuzzySearch,
+		).open();
 	}
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
+	private async activateSidebarView(): Promise<void> {
+		const existing =
+			this.app.workspace.getLeavesOfType(VIEW_TYPE_AI_SEARCH);
+		if (existing.length > 0 && existing[0]) {
+			await this.app.workspace.revealLeaf(existing[0]);
+			return;
+		}
+
+		const leaf = this.app.workspace.getRightLeaf(false);
+		if (leaf) {
+			await leaf.setViewState({
+				type: VIEW_TYPE_AI_SEARCH,
+				active: true,
+			});
+			await this.app.workspace.revealLeaf(leaf);
+		}
+	}
+
+	private async triggerReindex(): Promise<void> {
+		new Notice("Re-indexing vault...");
+		const status = await this.cacheManager.fullRebuild();
+		new Notice(`Indexed ${status.documentCount} notes`);
 	}
 }

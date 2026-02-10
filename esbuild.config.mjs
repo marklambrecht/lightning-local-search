@@ -1,6 +1,6 @@
 import esbuild from "esbuild";
 import process from "process";
-import { builtinModules } from 'node:module';
+import { builtinModules } from "node:module";
 
 const banner =
 `/*
@@ -31,7 +31,9 @@ const context = await esbuild.context({
 		"@lezer/common",
 		"@lezer/highlight",
 		"@lezer/lr",
-		...builtinModules],
+		"@huggingface/transformers",
+		...builtinModules,
+	],
 	format: "cjs",
 	target: "es2018",
 	logLevel: "info",
@@ -39,6 +41,13 @@ const context = await esbuild.context({
 	treeShaking: true,
 	outfile: "main.js",
 	minify: prod,
+	jsx: "automatic",
+	jsxImportSource: "preact",
+	alias: {
+		"react": "preact/compat",
+		"react-dom": "preact/compat",
+		"react/jsx-runtime": "preact/jsx-runtime",
+	},
 });
 
 if (prod) {
