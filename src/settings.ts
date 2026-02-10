@@ -174,6 +174,24 @@ export class AISearchSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Max context tokens")
+			.setDesc(
+				"Maximum amount of note content sent to Claude per request. " +
+					"Higher values give Claude more context for better answers " +
+					"but cost more tokens.",
+			)
+			.addSlider((slider) =>
+				slider
+					.setLimits(1000, 32000, 1000)
+					.setValue(this.plugin.settings.maxContextTokens)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.maxContextTokens = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName("Require consent per request")
 			.setDesc(
 				"Show a confirmation dialog before each AI request, " +
