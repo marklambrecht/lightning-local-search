@@ -10,8 +10,25 @@ export class ConsentManager {
 	 */
 	requestConsent(request: ClaudeRequest): Promise<boolean> {
 		return new Promise((resolve) => {
-			const modal = new ConsentModal(this.app, request, resolve);
+			let settled = false;
+			const settle = (value: boolean) => {
+				if (settled) return;
+				settled = true;
+				observer.disconnect();
+				resolve(value);
+			};
+
+			const modal = new ConsentModal(this.app, request, settle);
 			modal.open();
+
+			// Safety net: if modal is removed from DOM without calling
+			// close() (e.g. clicking outside), resolve false.
+			const observer = new MutationObserver(() => {
+				if (!document.body.contains(modal.containerEl)) {
+					settle(false);
+				}
+			});
+			observer.observe(document.body, { childList: true, subtree: true });
 		});
 	}
 }
@@ -83,6 +100,7 @@ class ConsentModal extends Modal {
 	}
 
 	onClose(): void {
+		this.onDecision(false);
 		this.contentEl.empty();
 	}
 }

@@ -1,7 +1,7 @@
 {
 	"id": "obsidian-ai-search-plugin",
 	"name": "Lightning Local Search",
-	"version": "0.1.5",
+	"version": "0.1.8",
 	"minAppVersion": "1.11.5",
 	"description": "Privacy-first AI-powered search with local vector indexing and optional Claude integration",
 	"author": "Mark Lambrecht",

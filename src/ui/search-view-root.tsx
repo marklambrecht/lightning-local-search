@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo } from "preact/hooks";
-import type { App } from "obsidian";
+import type { App, ItemView } from "obsidian";
 import type AISearchPlugin from "../main";
 import type { SearchResult, SearchViewState } from "../types";
 import { parseQuery } from "../indexer/query-parser";
@@ -15,9 +15,10 @@ import { AISummary } from "./components/AISummary";
 interface SearchViewRootProps {
 	plugin: AISearchPlugin;
 	app: App;
+	view: ItemView;
 }
 
-export function SearchViewRoot({ plugin, app }: SearchViewRootProps) {
+export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 	const [state, setState] = useState<SearchViewState>({
 		query: "",
 		results: [],
@@ -95,6 +96,20 @@ export function SearchViewRoot({ plugin, app }: SearchViewRootProps) {
 			void app.workspace.openLinkText(result.path, "", false);
 		},
 		[app],
+	);
+
+	const handleResultHover = useCallback(
+		(event: MouseEvent, targetEl: HTMLElement, path: string) => {
+			app.workspace.trigger("hover-link", {
+				event,
+				source: "preview",
+				hoverParent: view,
+				targetEl,
+				linktext: path,
+				sourcePath: "",
+			});
+		},
+		[app, view],
 	);
 
 	const handleAskAI = useCallback(async () => {
@@ -211,6 +226,7 @@ export function SearchViewRoot({ plugin, app }: SearchViewRootProps) {
 				showScores={plugin.settings.showScores}
 				searchTerms={searchTerms}
 				onResultClick={handleResultClick}
+				onResultHover={handleResultHover}
 			/>
 		</div>
 	);

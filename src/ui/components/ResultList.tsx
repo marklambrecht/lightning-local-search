@@ -6,6 +6,7 @@ interface ResultListProps {
 	showScores: boolean;
 	searchTerms: string[];
 	onResultClick: (result: SearchResult) => void;
+	onResultHover: (event: MouseEvent, targetEl: HTMLElement, path: string) => void;
 }
 
 export function ResultList({
@@ -13,6 +14,7 @@ export function ResultList({
 	showScores,
 	searchTerms,
 	onResultClick,
+	onResultHover,
 }: ResultListProps) {
 	if (results.length === 0) {
 		return null;
@@ -30,6 +32,7 @@ export function ResultList({
 					showScore={showScores}
 					searchTerms={searchTerms}
 					onClick={() => onResultClick(result)}
+					onHover={onResultHover}
 				/>
 			))}
 		</div>

@@ -34,6 +34,7 @@ export class AISearchView extends ItemView {
 			h(SearchViewRoot, {
 				plugin: this.plugin,
 				app: this.app,
+				view: this,
 			}),
 			container,
 		);

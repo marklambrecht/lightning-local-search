@@ -6,6 +6,7 @@ interface ResultCardProps {
 	showScore: boolean;
 	searchTerms: string[];
 	onClick: () => void;
+	onHover: (event: MouseEvent, targetEl: HTMLElement, path: string) => void;
 }
 
 function highlightTerms(
@@ -34,11 +35,16 @@ export function ResultCard({
 	showScore,
 	searchTerms,
 	onClick,
+	onHover,
 }: ResultCardProps) {
 	return (
 		<div
 			class="ai-search-result-card"
 			onClick={onClick}
+			onMouseEnter={(e) => {
+				const target = e.currentTarget as HTMLElement;
+				onHover(e as unknown as MouseEvent, target, result.path);
+			}}
 			role="button"
 			tabIndex={0}
 			onKeyDown={(e) => {
