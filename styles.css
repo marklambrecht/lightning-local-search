@@ -145,6 +145,13 @@
 	margin-top: 4px;
 }
 
+.ai-search-highlight {
+	background-color: #e6b800;
+	color: var(--text-normal);
+	border-radius: 2px;
+	padding: 0 1px;
+}
+
 /* ─── SuggestModal results ─────────────────────────────────────── */
 .ai-search-suggestion .ai-search-result-header {
 	display: flex;
@@ -218,6 +225,33 @@
 	color: var(--text-error);
 	border-radius: var(--radius-s);
 	font-size: var(--font-ui-smaller);
+}
+
+/* ─── AI question section ─────────────────────────────────────── */
+.ai-search-ai-section {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.ai-search-ai-question {
+	width: 100%;
+	min-height: 60px;
+	padding: 8px 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	font-family: inherit;
+	resize: vertical;
+	box-sizing: border-box;
+}
+
+.ai-search-ai-question:focus {
+	border-color: var(--interactive-accent);
+	outline: none;
+	box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
 }
 
 /* ─── Ask AI button ───────────────────────────────────────────── */

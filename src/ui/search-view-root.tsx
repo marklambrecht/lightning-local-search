@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "preact/hooks";
+import { useState, useCallback, useRef, useMemo } from "preact/hooks";
 import type { App } from "obsidian";
 import type AISearchPlugin from "../main";
 import type { SearchResult, SearchViewState } from "../types";
@@ -30,6 +30,7 @@ export function SearchViewRoot({ plugin, app }: SearchViewRootProps) {
 	});
 
 	const [isAskingAI, setIsAskingAI] = useState(false);
+	const [aiQuestion, setAiQuestion] = useState("");
 	const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 	const handleSearch = useCallback(
@@ -41,6 +42,7 @@ export function SearchViewRoot({ plugin, app }: SearchViewRootProps) {
 				error: null,
 				aiSummary: null,
 			}));
+			setAiQuestion(query);
 
 			if (searchTimeout.current) {
 				clearTimeout(searchTimeout.current);
@@ -106,6 +108,7 @@ export function SearchViewRoot({ plugin, app }: SearchViewRootProps) {
 				state.query,
 				state.results,
 				plugin.settings.maxContextTokens,
+				aiQuestion,
 			);
 
 			// Consent check
@@ -145,7 +148,14 @@ export function SearchViewRoot({ plugin, app }: SearchViewRootProps) {
 		} finally {
 			setIsAskingAI(false);
 		}
-	}, [state.results, state.query, isAskingAI, plugin, app]);
+	}, [state.results, state.query, isAskingAI, aiQuestion, plugin, app]);
+
+	const searchTerms = useMemo(() => {
+		const parsed = parseQuery(state.query);
+		return parsed.text
+			.split(/\s+/)
+			.filter((t) => t.length > 0);
+	}, [state.query]);
 
 	const showAIButton =
 		plugin.settings.enableAI &&
@@ -174,18 +184,32 @@ export function SearchViewRoot({ plugin, app }: SearchViewRootProps) {
 			{state.aiSummary && <AISummary summary={state.aiSummary} />}
 
 			{showAIButton && !state.aiSummary && (
-				<button
-					class="ai-search-ask-ai-btn"
-					onClick={() => void handleAskAI()}
-					disabled={isAskingAI}
-				>
-					{isAskingAI ? "Asking Claude..." : "Ask AI for summary"}
-				</button>
+				<div class="ai-search-ai-section">
+					<textarea
+						class="ai-search-ai-question"
+						rows={3}
+						placeholder="Edit your question for Claude..."
+						value={aiQuestion}
+						onInput={(e) =>
+							setAiQuestion(
+								(e.target as HTMLTextAreaElement).value,
+							)
+						}
+					/>
+					<button
+						class="ai-search-ask-ai-btn"
+						onClick={() => void handleAskAI()}
+						disabled={isAskingAI || aiQuestion.trim().length === 0}
+					>
+						{isAskingAI ? "Asking Claude..." : "Ask AI"}
+					</button>
+				</div>
 			)}
 
 			<ResultList
 				results={state.results}
 				showScores={plugin.settings.showScores}
+				searchTerms={searchTerms}
 				onResultClick={handleResultClick}
 			/>
 		</div>

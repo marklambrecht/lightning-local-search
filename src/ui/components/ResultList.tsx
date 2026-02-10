@@ -4,12 +4,14 @@ import { ResultCard } from "./ResultCard";
 interface ResultListProps {
 	results: SearchResult[];
 	showScores: boolean;
+	searchTerms: string[];
 	onResultClick: (result: SearchResult) => void;
 }
 
 export function ResultList({
 	results,
 	showScores,
+	searchTerms,
 	onResultClick,
 }: ResultListProps) {
 	if (results.length === 0) {
@@ -26,6 +28,7 @@ export function ResultList({
 					key={result.path}
 					result={result}
 					showScore={showScores}
+					searchTerms={searchTerms}
 					onClick={() => onResultClick(result)}
 				/>
 			))}

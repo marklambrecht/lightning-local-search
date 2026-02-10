@@ -8,6 +8,7 @@ export function buildPrompt(
 	query: string,
 	results: SearchResult[],
 	maxTokens: number,
+	customQuestion?: string,
 ): ClaudeRequest {
 	const contextParts: string[] = [];
 	let estimatedTokens = 0;
@@ -38,8 +39,9 @@ export function buildPrompt(
 		"Reference specific notes by title when relevant. " +
 		"If the excerpts don't contain enough information, say so honestly.";
 
+	const questionText = customQuestion?.trim() || query;
 	const userMessage =
-		`Query: ${query}\n\n` +
+		`Query: ${questionText}\n\n` +
 		`Here are the most relevant notes from the vault:\n\n` +
 		contextParts.join("\n");
 
