@@ -35,7 +35,7 @@ export class CacheManager {
 			}
 		} catch {
 			// Cache corrupted or incompatible, fall through to rebuild
-			console.warn("AI Search: Failed to load cached index, rebuilding");
+			console.warn("Lightning Local Search: Failed to load cached index, rebuilding");
 		}
 
 		return this.fullRebuild(onProgress);

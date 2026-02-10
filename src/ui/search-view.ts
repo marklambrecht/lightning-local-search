@@ -17,7 +17,7 @@ export class AISearchView extends ItemView {
 	}
 
 	getDisplayText(): string {
-		return "AI search";
+		return "Lightning Local Search";
 	}
 
 	getIcon(): string {

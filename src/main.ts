@@ -38,7 +38,7 @@ export default class AISearchPlugin extends Plugin {
 		this.addSettingTab(new AISearchSettingTab(this.app, this));
 
 		// Ribbon icon
-		this.addRibbonIcon("search", "AI search", () => {
+		this.addRibbonIcon("search", "Lightning Local Search", () => {
 			this.openSearchModal();
 		});
 
@@ -102,7 +102,7 @@ export default class AISearchPlugin extends Plugin {
 		// Initialize index (load from cache or rebuild)
 		if (this.settings.indexOnStartup) {
 			const status = await this.cacheManager.initialize();
-			new Notice(`AI search: indexed ${status.documentCount} notes`);
+			new Notice(`Lightning Local Search: indexed ${status.documentCount} notes`);
 		}
 
 		// Register file watchers for incremental sync
