@@ -4,6 +4,7 @@ export interface AISearchSettings {
 	maxResults: number;
 	showScores: boolean;
 	excerptLength: number;
+	excerptLines: number;
 	enableFuzzySearch: boolean;
 
 	// Indexing
@@ -25,6 +26,10 @@ export interface AISearchSettings {
 
 	// Privacy
 	auditLogEnabled: boolean;
+
+	// Pinned queries
+	pinnedQueries: string[];
+	searchHistory: string[];
 }
 
 // ─── Index Schema ───────────────────────────────────────────────────
@@ -58,10 +63,18 @@ export interface IndexedNote {
 export interface ParsedQuery {
 	/** Free-text search terms */
 	text: string;
+	/** Exact phrases from "quoted terms" */
+	phrases: string[];
 	/** Tag filters: #tag1, #tag2 */
 	tags: string[];
-	/** Folder/path filter: path:folder/subfolder */
+	/** Negated tag filters: -#tag */
+	excludedTags: string[];
+	/** Negated text terms: -word */
+	excludedTerms: string[];
+	/** Folder/path filter: path:folder/subfolder or folder:folder */
 	paths: string[];
+	/** Heading filter: heading:term */
+	headingTerms: string[];
 	/** Frontmatter filters: property:value */
 	frontmatter: Record<string, string>;
 	/** Date range filters */

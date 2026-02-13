@@ -1,4 +1,4 @@
-import { Notice, Plugin } from "obsidian";
+import { Notice, Platform, Plugin } from "obsidian";
 import type { AISearchSettings } from "./types";
 import { COMMAND_IDS, DEFAULT_SETTINGS, VIEW_TYPE_AI_SEARCH } from "./constants";
 import { AISearchSettingTab } from "./settings";
@@ -12,6 +12,9 @@ import { AISearchView } from "./ui/search-view";
 import { AuditLog } from "./claude/audit-log";
 import { EmbeddingService } from "./embeddings/embedding-service";
 import { EmbeddingWorker } from "./embeddings/embedding-worker";
+import { debounce } from "./utils/debounce";
+
+const PERSIST_DEBOUNCE_MS = 30_000;
 
 export default class AISearchPlugin extends Plugin {
 	settings: AISearchSettings = { ...DEFAULT_SETTINGS };
@@ -24,6 +27,7 @@ export default class AISearchPlugin extends Plugin {
 	private cacheManager!: CacheManager;
 	private embeddingService: EmbeddingService | null = null;
 	private embeddingWorker: EmbeddingWorker | null = null;
+	private debouncedPersist: (() => void) & { cancel(): void } = Object.assign(() => {}, { cancel: () => {} });
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -56,6 +60,12 @@ export default class AISearchPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: COMMAND_IDS.openTab,
+			name: "Open search in tab",
+			callback: () => void this.activateTabView(),
+		});
+
+		this.addCommand({
 			id: COMMAND_IDS.reindex,
 			name: "Re-index vault",
 			callback: () => void this.triggerReindex(),
@@ -68,6 +78,13 @@ export default class AISearchPlugin extends Plugin {
 	}
 
 	onunload(): void {
+		// Flush any pending index persist before unloading (desktop only)
+		this.debouncedPersist.cancel();
+		if (!Platform.isMobile) {
+			void this.cacheManager?.persistIndex();
+		}
+
+		this.incrementalSync = undefined as unknown as IncrementalSync;
 		this.embeddingWorker?.cancel();
 		this.embeddingService?.dispose();
 	}
@@ -88,6 +105,7 @@ export default class AISearchPlugin extends Plugin {
 		this.vaultIndexer = new VaultIndexer(
 			this.app,
 			this.settings.excludedFolders,
+			this.settings.excludedTags,
 		);
 		this.indexStore = new IndexStore();
 
@@ -105,13 +123,23 @@ export default class AISearchPlugin extends Plugin {
 			new Notice(`Lightning Local Search: indexed ${status.documentCount} notes`);
 		}
 
+		// Debounced persist — serializes the full index to IndexedDB.
+		// Using a long debounce (30s) prevents main-thread freezes from
+		// JSON.stringify on every keystroke-triggered file save.
+		// Disabled on mobile — serializing the index causes OOM crashes.
+		if (!Platform.isMobile) {
+			this.debouncedPersist = debounce(() => {
+				void this.cacheManager.persistIndex();
+			}, PERSIST_DEBOUNCE_MS);
+		}
+
 		// Register file watchers for incremental sync
 		this.incrementalSync = new IncrementalSync(
 			this,
 			this.oramaIndex,
 			this.vaultIndexer,
 			() => {
-				void this.cacheManager.persistIndex();
+				this.debouncedPersist();
 			},
 		);
 		this.incrementalSync.register();
@@ -166,6 +194,15 @@ export default class AISearchPlugin extends Plugin {
 			});
 			await this.app.workspace.revealLeaf(leaf);
 		}
+	}
+
+	private async activateTabView(): Promise<void> {
+		const leaf = this.app.workspace.getLeaf("tab");
+		await leaf.setViewState({
+			type: VIEW_TYPE_AI_SEARCH,
+			active: true,
+		});
+		this.app.workspace.revealLeaf(leaf);
 	}
 
 	private async triggerReindex(): Promise<void> {

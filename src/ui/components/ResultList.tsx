@@ -5,7 +5,9 @@ interface ResultListProps {
 	results: SearchResult[];
 	showScores: boolean;
 	searchTerms: string[];
-	onResultClick: (result: SearchResult) => void;
+	excerptLines: number;
+	selectedIndex: number;
+	onResultClick: (result: SearchResult, e: MouseEvent) => void;
 	onResultHover: (event: MouseEvent, targetEl: HTMLElement, path: string) => void;
 }
 
@@ -13,6 +15,8 @@ export function ResultList({
 	results,
 	showScores,
 	searchTerms,
+	excerptLines,
+	selectedIndex,
 	onResultClick,
 	onResultHover,
 }: ResultListProps) {
@@ -22,16 +26,15 @@ export function ResultList({
 
 	return (
 		<div class="ai-search-results">
-			<div class="ai-search-result-count">
-				{results.length} result{results.length !== 1 ? "s" : ""}
-			</div>
-			{results.map((result) => (
+			{results.map((result, index) => (
 				<ResultCard
 					key={result.path}
 					result={result}
 					showScore={showScores}
 					searchTerms={searchTerms}
-					onClick={() => onResultClick(result)}
+					excerptLines={excerptLines}
+					isSelected={index === selectedIndex}
+					onClick={(e) => onResultClick(result, e)}
 					onHover={onResultHover}
 				/>
 			))}

@@ -16,6 +16,7 @@ const SCHEMA = {
 	title: "string" as const,
 	content: "string" as const,
 	headings: "string[]" as const,
+	frontmatter: "string" as const,
 	path: "enum" as const,
 	tags: "enum[]" as const,
 	folder: "enum" as const,
@@ -28,6 +29,7 @@ interface OramaDocument {
 	title: string;
 	content: string;
 	headings: string[];
+	frontmatter: string;
 	path: string;
 	tags: string[];
 	folder: string;
@@ -44,15 +46,20 @@ export interface IndexableDocument {
 	headings: string[];
 	createdAt: number;
 	modifiedAt: number;
+	frontmatter: string;
 }
 
 export class OramaIndex {
 	private db: AnyOrama | null = null;
 	private pathToId = new Map<string, string>();
+	private knownTags = new Set<string>();
+	private knownFolders = new Set<string>();
 
 	async initialize(): Promise<void> {
 		this.db = await create({ schema: SCHEMA, language: "english" });
 		this.pathToId.clear();
+		this.knownTags.clear();
+		this.knownFolders.clear();
 	}
 
 	async loadFromSnapshot(raw: RawData, pathMap: Record<string, string>): Promise<void> {
@@ -73,6 +80,10 @@ export class OramaIndex {
 	async upsertDocument(doc: IndexableDocument): Promise<void> {
 		if (!this.db) return;
 
+		// Track known tags and folders for auto-suggest
+		for (const tag of doc.tags) this.knownTags.add(tag);
+		if (doc.folder) this.knownFolders.add(doc.folder);
+
 		// Remove existing if present
 		const existingId = this.pathToId.get(doc.path);
 		if (existingId) {
@@ -87,6 +98,7 @@ export class OramaIndex {
 			title: doc.title,
 			content: doc.content,
 			headings: doc.headings,
+			frontmatter: doc.frontmatter,
 			path: doc.path,
 			tags: doc.tags,
 			folder: doc.folder,
@@ -111,29 +123,164 @@ export class OramaIndex {
 		}
 	}
 
-	async search(query: ParsedQuery, limit: number, excerptLength: number, fuzzy = true): Promise<SearchResult[]> {
+	async search(query: ParsedQuery, limit: number, excerptLength: number, fuzzy = true, caseSensitive = false): Promise<SearchResult[]> {
 		if (!this.db) return [];
 
+		const hasPhrases = query.phrases.length > 0;
+		const hasPaths = query.paths.length > 0;
+		const hasTextTerms = query.text.trim().length > 0;
+		const hasExcludedTerms = query.excludedTerms.length > 0;
+		const hasExcludedTags = query.excludedTags.length > 0;
+		const hasHeadingTerms = query.headingTerms.length > 0;
+		const hasFrontmatter = Object.keys(query.frontmatter).length > 0;
+		const needsPostFilter = hasPhrases || hasPaths || (caseSensitive && hasTextTerms)
+			|| hasExcludedTerms || hasExcludedTags || hasHeadingTerms || hasFrontmatter;
+
+		// Build Orama where clause (tags + dates only; paths use post-filter)
 		const whereClause = this.buildWhereClause(query);
-		const hasFiltersOnly = query.text.length === 0 && Object.keys(whereClause).length > 0;
 
-		// If there's no text term but there are filters, do a broad search
-		const searchTerm = hasFiltersOnly ? "" : query.text;
+		// For phrase searches, send only the longest word from each phrase to Orama
+		// (the English tokenizer strips stop words and mis-stems non-English words).
+		// The post-filter handles exact phrase matching.
+		let searchTerm: string;
+		if (hasPhrases) {
+			const longestPerPhrase = query.phrases.map((phrase) => {
+				const words = phrase.split(/\s+/).filter((w) => w.length > 2);
+				words.sort((a, b) => b.length - a.length);
+				return words[0] ?? "";
+			});
+			searchTerm = [query.text, ...longestPerPhrase]
+				.filter(Boolean)
+				.join(" ")
+				.trim();
+		} else {
+			searchTerm = query.text;
+		}
 
-		const results = await search(this.db, {
+		const hasFiltersOnly = searchTerm.length === 0 && (Object.keys(whereClause).length > 0 || hasPaths || hasHeadingTerms || hasFrontmatter);
+		if (hasFiltersOnly) searchTerm = "";
+		const where = Object.keys(whereClause).length > 0 ? whereClause : undefined;
+
+		// Request extra results when post-filtering will be applied
+		const searchLimit = needsPostFilter ? limit * 10 : limit;
+
+		const searchOpts = {
 			term: searchTerm,
-			tolerance: fuzzy && searchTerm.length > 4 ? 1 : 0,
 			properties: ["title", "content", "headings"],
-			limit,
-			where: Object.keys(whereClause).length > 0 ? whereClause : undefined,
+			limit: searchLimit,
+			where,
 			boost: {
 				title: 3,
 				headings: 2,
 				content: 1,
 			},
+		};
+
+		// Force exact matching when phrases are present; otherwise try fuzzy first
+		const useFuzzy = fuzzy && !hasPhrases && searchTerm.length > 4;
+
+		let results = await search(this.db, {
+			...searchOpts,
+			tolerance: useFuzzy ? 1 : 0,
 		});
 
-		return results.hits.map((hit) => {
+		if (results.hits.length === 0 && useFuzzy) {
+			results = await search(this.db, {
+				...searchOpts,
+				tolerance: 0,
+			});
+		}
+
+		let hits = results.hits;
+
+		// Post-filter: path prefix matching (supports subfolders)
+		if (hasPaths) {
+			hits = hits.filter((hit) => {
+				const doc = hit.document as unknown as OramaDocument;
+				const docPath = doc.path.toLowerCase();
+				const docFolder = doc.folder?.toLowerCase() ?? "";
+				return query.paths.some((filterPath) => {
+					const fp = filterPath.toLowerCase();
+					return (
+						docFolder === fp ||
+						docFolder.startsWith(fp + "/") ||
+						docPath.startsWith(fp + "/") ||
+						docPath.startsWith(fp.toLowerCase())
+					);
+				});
+			});
+		}
+
+		// Post-filter: exact phrase matches
+		if (hasPhrases) {
+			hits = hits.filter((hit) => {
+				const doc = hit.document as unknown as OramaDocument;
+				const raw = `${doc.title} ${doc.content} ${doc.headings.join(" ")}`.replace(/\s+/g, " ");
+				const searchableText = caseSensitive ? raw : raw.toLowerCase();
+				return query.phrases.every((phrase) => {
+					const normalized = phrase.replace(/\s+/g, " ");
+					return searchableText.includes(caseSensitive ? normalized : normalized.toLowerCase());
+				});
+			});
+		}
+
+		// Post-filter: case-sensitive matching for regular search terms
+		if (caseSensitive && hasTextTerms) {
+			const terms = query.text.split(/\s+/).filter((t) => t.length > 0);
+			hits = hits.filter((hit) => {
+				const doc = hit.document as unknown as OramaDocument;
+				const searchableText = `${doc.title} ${doc.content} ${doc.headings.join(" ")}`;
+				return terms.every((term) => searchableText.includes(term));
+			});
+		}
+
+		// Post-filter: negated terms — exclude results containing these words
+		if (hasExcludedTerms) {
+			hits = hits.filter((hit) => {
+				const doc = hit.document as unknown as OramaDocument;
+				const searchableText = `${doc.title} ${doc.content} ${doc.headings.join(" ")}`.toLowerCase();
+				return query.excludedTerms.every(
+					(term) => !searchableText.includes(term.toLowerCase()),
+				);
+			});
+		}
+
+		// Post-filter: negated tags — exclude results that have these tags
+		if (hasExcludedTags) {
+			hits = hits.filter((hit) => {
+				const doc = hit.document as unknown as OramaDocument;
+				return query.excludedTags.every(
+					(tag) => !doc.tags.some((t) => t.toLowerCase() === tag.toLowerCase()),
+				);
+			});
+		}
+
+		// Post-filter: heading terms — results must have a heading containing the term
+		if (hasHeadingTerms) {
+			hits = hits.filter((hit) => {
+				const doc = hit.document as unknown as OramaDocument;
+				return query.headingTerms.every((term) => {
+					const lowerTerm = caseSensitive ? term : term.toLowerCase();
+					return doc.headings.some((h) => {
+						const heading = caseSensitive ? h : h.toLowerCase();
+						return heading.includes(lowerTerm);
+					});
+				});
+			});
+		}
+
+		// Post-filter: frontmatter property:value matches
+		if (hasFrontmatter) {
+			hits = hits.filter((hit) => {
+				const doc = hit.document as unknown as OramaDocument;
+				const fm = doc.frontmatter.toLowerCase();
+				return Object.entries(query.frontmatter).every(([key, value]) => {
+					return fm.includes(`${key.toLowerCase()}:${value.toLowerCase()}`);
+				});
+			});
+		}
+
+		return hits.slice(0, limit).map((hit) => {
 			const doc = hit.document as unknown as OramaDocument;
 			return {
 				path: doc.path,
@@ -157,11 +304,7 @@ export class OramaIndex {
 			where["tags"] = { containsAll: query.tags };
 		}
 
-		if (query.paths.length === 1) {
-			where["folder"] = { eq: query.paths[0] };
-		} else if (query.paths.length > 1) {
-			where["folder"] = { in: query.paths };
-		}
+		// Path filtering moved to post-filter for subfolder support
 
 		for (const filter of query.dateFilters) {
 			const field = filter.field === "created" ? "createdAt" : "modifiedAt";
@@ -179,6 +322,16 @@ export class OramaIndex {
 		}
 
 		return where;
+	}
+
+	/** Get all unique tags known to the index */
+	getAllTags(): string[] {
+		return [...this.knownTags].sort();
+	}
+
+	/** Get all unique folders known to the index */
+	getAllFolders(): string[] {
+		return [...this.knownFolders].sort();
 	}
 
 	get documentCount(): number {

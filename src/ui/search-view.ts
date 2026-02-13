@@ -6,6 +6,7 @@ import { SearchViewRoot } from "./search-view-root";
 
 export class AISearchView extends ItemView {
 	private plugin: AISearchPlugin;
+	private resultCount = 0;
 
 	constructor(leaf: WorkspaceLeaf, plugin: AISearchPlugin) {
 		super(leaf);
@@ -17,7 +18,16 @@ export class AISearchView extends ItemView {
 	}
 
 	getDisplayText(): string {
+		if (this.resultCount > 0) {
+			return `Lightning Local Search (${this.resultCount})`;
+		}
 		return "Lightning Local Search";
+	}
+
+	updateResultCount(count: number): void {
+		this.resultCount = count;
+		// updateHeader exists at runtime but isn't in the type definitions
+		(this.leaf as unknown as { updateHeader(): void }).updateHeader();
 	}
 
 	getIcon(): string {

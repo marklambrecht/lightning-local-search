@@ -5,8 +5,8 @@
 export function stripMarkdown(content: string): string {
 	let text = content;
 
-	// Remove YAML frontmatter
-	text = text.replace(/^---\n[\s\S]*?\n---\n?/, "");
+	// Remove YAML frontmatter (handles \r\n and \n line endings)
+	text = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
 
 	// Remove code blocks
 	text = text.replace(/```[\s\S]*?```/g, "");
@@ -92,10 +92,36 @@ export function generatePreviewExcerpt(
 	content: string,
 	length: number,
 ): string {
-	if (content.length <= length) return content;
-	const spaceIdx = content.lastIndexOf(" ", length);
+	// Skip leading whitespace and short lines (headings, dates, metadata-like lines)
+	// to get to the actual body content
+	const lines = content.split("\n");
+	let startIdx = 0;
+	let skippedChars = 0;
+	for (let i = 0; i < lines.length && i < 10; i++) {
+		const line = lines[i]?.trim() ?? "";
+		// Skip empty lines and very short lines (likely title, date, author)
+		if (line.length === 0 || line.length < 30) {
+			skippedChars += (lines[i]?.length ?? 0) + 1; // +1 for \n
+			startIdx = i + 1;
+			continue;
+		}
+		break;
+	}
+
+	const body = content.slice(skippedChars).trim();
+	if (body.length === 0) {
+		// Fallback to original content if everything was skipped
+		const text = content.trim();
+		if (text.length <= length) return text;
+		const spaceIdx = text.lastIndexOf(" ", length);
+		const cutoff = spaceIdx > length - 30 ? spaceIdx : length;
+		return text.slice(0, cutoff) + "...";
+	}
+
+	if (body.length <= length) return body;
+	const spaceIdx = body.lastIndexOf(" ", length);
 	const cutoff = spaceIdx > length - 30 ? spaceIdx : length;
-	return content.slice(0, cutoff) + "...";
+	return body.slice(0, cutoff) + "...";
 }
 
 /**

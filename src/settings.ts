@@ -71,6 +71,20 @@ export class AISearchSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		new Setting(containerEl)
+			.setName("Excerpt lines")
+			.setDesc("Maximum number of lines to display in result excerpts")
+			.addSlider((slider) =>
+				slider
+					.setLimits(1, 10, 1)
+					.setValue(this.plugin.settings.excerptLines)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.excerptLines = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
 		// ── Indexing settings ──
 		new Setting(containerEl).setName("Indexing").setHeading();
 
@@ -85,6 +99,25 @@ export class AISearchSettingTab extends PluginSettingTab {
 						this.plugin.settings.excludedFolders = value
 							.split(",")
 							.map((s) => s.trim())
+							.filter((s) => s.length > 0);
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Excluded tags")
+			.setDesc(
+				"Comma-separated list of tags to exclude from indexing. " +
+					"Notes with any of these tags will be skipped entirely.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("template, draft")
+					.setValue(this.plugin.settings.excludedTags.join(", "))
+					.onChange(async (value) => {
+						this.plugin.settings.excludedTags = value
+							.split(",")
+							.map((s) => s.trim().replace(/^#/, ""))
 							.filter((s) => s.length > 0);
 						await this.plugin.saveSettings();
 					}),

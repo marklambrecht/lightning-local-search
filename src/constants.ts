@@ -5,15 +5,17 @@ export const VIEW_TYPE_AI_SEARCH = "ai-search-view";
 export const COMMAND_IDS = {
 	openSearch: "open-ai-search",
 	openSidebar: "open-ai-search-sidebar",
+	openTab: "open-ai-search-tab",
 	reindex: "reindex-vault",
 } as const;
 
-export const INDEX_SCHEMA_VERSION = 1;
+export const INDEX_SCHEMA_VERSION = 2;
 
 export const DEFAULT_SETTINGS: AISearchSettings = {
 	maxResults: 20,
 	showScores: false,
-	excerptLength: 150,
+	excerptLength: 300,
+	excerptLines: 4,
 	enableFuzzySearch: true,
 	excludedFolders: [],
 	excludedTags: [],
@@ -27,7 +29,15 @@ export const DEFAULT_SETTINGS: AISearchSettings = {
 	maxContextTokens: 4000,
 	requireConsentPerRequest: true,
 	auditLogEnabled: true,
+	pinnedQueries: [],
+	searchHistory: [],
 };
+
+export const MAX_SEARCH_HISTORY = 15;
+
+export const RESERVED_PREFIXES = new Set([
+	"path", "folder", "created", "modified", "heading",
+]);
 
 export const DEBOUNCE_MS = {
 	fileChange: 2000,
