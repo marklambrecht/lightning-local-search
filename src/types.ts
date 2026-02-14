@@ -23,6 +23,7 @@ export interface AISearchSettings {
 	claudeModel: string;
 	maxContextTokens: number;
 	requireConsentPerRequest: boolean;
+	aiExcludedFolders: string[];
 
 	// Privacy
 	auditLogEnabled: boolean;
@@ -65,7 +66,7 @@ export interface ParsedQuery {
 	text: string;
 	/** Exact phrases from "quoted terms" */
 	phrases: string[];
-	/** Tag filters: #tag1, #tag2 */
+	/** Tag filters: #tag1, #tag2 or tag:tag1 */
 	tags: string[];
 	/** Negated tag filters: -#tag */
 	excludedTags: string[];
@@ -73,9 +74,15 @@ export interface ParsedQuery {
 	excludedTerms: string[];
 	/** Folder/path filter: path:folder/subfolder or folder:folder */
 	paths: string[];
+	/** File name filter: file:term (also accepts title:term) */
+	fileTerms: string[];
 	/** Heading filter: heading:term */
 	headingTerms: string[];
-	/** Frontmatter filters: property:value */
+	/** Line query: line:(term1 term2) — all terms on the same line */
+	lineQueries: string[][];
+	/** Section query: section:(term1 term2) — all terms under same heading */
+	sectionQueries: string[][];
+	/** Frontmatter filters: [property]:value or property:value */
 	frontmatter: Record<string, string>;
 	/** Date range filters */
 	dateFilters: DateFilter[];

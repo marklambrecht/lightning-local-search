@@ -28,6 +28,7 @@ export const DEFAULT_SETTINGS: AISearchSettings = {
 	claudeModel: "claude-sonnet-4-5-20250929",
 	maxContextTokens: 4000,
 	requireConsentPerRequest: true,
+	aiExcludedFolders: [],
 	auditLogEnabled: true,
 	pinnedQueries: [],
 	searchHistory: [],
@@ -36,7 +37,8 @@ export const DEFAULT_SETTINGS: AISearchSettings = {
 export const MAX_SEARCH_HISTORY = 15;
 
 export const RESERVED_PREFIXES = new Set([
-	"path", "folder", "created", "modified", "heading",
+	"path", "folder", "created", "modified", "title", "heading",
+	"file", "tag", "line", "section",
 ]);
 
 export const DEBOUNCE_MS = {

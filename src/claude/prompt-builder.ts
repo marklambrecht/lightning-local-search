@@ -50,7 +50,7 @@ export function buildPrompt(
 	return {
 		id: crypto.randomUUID(),
 		timestamp: Date.now(),
-		query,
+		query: questionText,
 		contextNoteCount: noteCount,
 		contextTokenEstimate: estimatedTokens,
 		prompt: fullPrompt,

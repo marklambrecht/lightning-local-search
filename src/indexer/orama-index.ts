@@ -131,10 +131,14 @@ export class OramaIndex {
 		const hasTextTerms = query.text.trim().length > 0;
 		const hasExcludedTerms = query.excludedTerms.length > 0;
 		const hasExcludedTags = query.excludedTags.length > 0;
+		const hasFileTerms = query.fileTerms.length > 0;
 		const hasHeadingTerms = query.headingTerms.length > 0;
+		const hasLineQueries = query.lineQueries.length > 0;
+		const hasSectionQueries = query.sectionQueries.length > 0;
 		const hasFrontmatter = Object.keys(query.frontmatter).length > 0;
 		const needsPostFilter = hasPhrases || hasPaths || (caseSensitive && hasTextTerms)
-			|| hasExcludedTerms || hasExcludedTags || hasHeadingTerms || hasFrontmatter;
+			|| hasExcludedTerms || hasExcludedTags || hasFileTerms || hasHeadingTerms
+			|| hasLineQueries || hasSectionQueries || hasFrontmatter;
 
 		// Build Orama where clause (tags + dates only; paths use post-filter)
 		const whereClause = this.buildWhereClause(query);
@@ -157,7 +161,9 @@ export class OramaIndex {
 			searchTerm = query.text;
 		}
 
-		const hasFiltersOnly = searchTerm.length === 0 && (Object.keys(whereClause).length > 0 || hasPaths || hasHeadingTerms || hasFrontmatter);
+		const hasFiltersOnly = searchTerm.length === 0 && (Object.keys(whereClause).length > 0
+			|| hasPaths || hasFileTerms || hasHeadingTerms || hasLineQueries
+			|| hasSectionQueries || hasFrontmatter);
 		if (hasFiltersOnly) searchTerm = "";
 		const where = Object.keys(whereClause).length > 0 ? whereClause : undefined;
 
@@ -255,26 +261,77 @@ export class OramaIndex {
 			});
 		}
 
+		// Post-filter: file name terms — results must have a filename containing the term
+		if (hasFileTerms) {
+			hits = hits.filter((hit) => {
+				const doc = hit.document as unknown as OramaDocument;
+				const docTitle = caseSensitive ? doc.title : doc.title.toLowerCase();
+				return query.fileTerms.every((term) => {
+					const t = caseSensitive ? term : term.toLowerCase();
+					return docTitle.includes(t);
+				});
+			});
+		}
+
 		// Post-filter: heading terms — results must have a heading containing the term
 		if (hasHeadingTerms) {
 			hits = hits.filter((hit) => {
 				const doc = hit.document as unknown as OramaDocument;
 				return query.headingTerms.every((term) => {
-					const lowerTerm = caseSensitive ? term : term.toLowerCase();
+					const t = caseSensitive ? term : term.toLowerCase();
 					return doc.headings.some((h) => {
 						const heading = caseSensitive ? h : h.toLowerCase();
-						return heading.includes(lowerTerm);
+						return heading.includes(t);
 					});
 				});
 			});
 		}
 
-		// Post-filter: frontmatter property:value matches
+		// Post-filter: line queries — all terms in each group must appear on the same line
+		if (hasLineQueries) {
+			hits = hits.filter((hit) => {
+				const doc = hit.document as unknown as OramaDocument;
+				const lines = doc.content.split("\n");
+				return query.lineQueries.every((terms) =>
+					lines.some((line) => {
+						const l = caseSensitive ? line : line.toLowerCase();
+						return terms.every((term) => {
+							const t = caseSensitive ? term : term.toLowerCase();
+							return l.includes(t);
+						});
+					}),
+				);
+			});
+		}
+
+		// Post-filter: section queries — all terms must appear under the same heading section
+		if (hasSectionQueries) {
+			hits = hits.filter((hit) => {
+				const doc = hit.document as unknown as OramaDocument;
+				// Split content into sections by heading lines
+				const sections = doc.content.split(/^(?=#{1,6} )/m);
+				return query.sectionQueries.every((terms) =>
+					sections.some((section) => {
+						const s = caseSensitive ? section : section.toLowerCase();
+						return terms.every((term) => {
+							const t = caseSensitive ? term : term.toLowerCase();
+							return s.includes(t);
+						});
+					}),
+				);
+			});
+		}
+
+		// Post-filter: frontmatter property matches
 		if (hasFrontmatter) {
 			hits = hits.filter((hit) => {
 				const doc = hit.document as unknown as OramaDocument;
 				const fm = doc.frontmatter.toLowerCase();
 				return Object.entries(query.frontmatter).every(([key, value]) => {
+					if (value === "") {
+						// [property] without value — just check the key exists
+						return fm.includes(`${key.toLowerCase()}:`);
+					}
 					return fm.includes(`${key.toLowerCase()}:${value.toLowerCase()}`);
 				});
 			});

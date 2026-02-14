@@ -3,26 +3,32 @@ import { RESERVED_PREFIXES } from "../constants";
 
 /**
  * Parses a query string supporting Obsidian-like syntax:
- *   #tag            - filter by tag
- *   -#tag           - exclude notes with tag
- *   -word           - exclude results containing word
- *   path:folder     - filter by folder path
- *   folder:folder   - alias for path:
- *   heading:term    - filter by heading content
- *   property:value  - filter by frontmatter property
- *   created:>date   - created after date
- *   created:<date   - created before date
- *   created:date    - created on date
- *   modified:>date / modified:<date / modified:date
- *   "exact phrase"  - exact phrase match
- *   free text       - full-text search terms
+ *   path:folder      - match path of the file
+ *   file:term        - match file name
+ *   tag:term         - search for tags (also #tag)
+ *   line:(foo bar)   - search keywords on same line
+ *   section:(foo bar)- search keywords under same heading
+ *   [property]:value - match property
+ *   #tag             - filter by tag
+ *   -#tag            - exclude notes with tag
+ *   -word            - exclude results containing word
+ *   "exact phrase"   - exact phrase match
+ *   title:term       - alias for file:
+ *   heading:term     - filter by heading content
+ *   folder:folder    - alias for path:
+ *   created:>date    - created after date
+ *   modified:<date   - modified before date
+ *   free text        - full-text search terms
  */
 export function parseQuery(raw: string): ParsedQuery {
 	const tags: string[] = [];
 	const excludedTags: string[] = [];
 	const excludedTerms: string[] = [];
 	const paths: string[] = [];
+	const fileTerms: string[] = [];
 	const headingTerms: string[] = [];
+	const lineQueries: string[][] = [];
+	const sectionQueries: string[][] = [];
 	const dateFilters: DateFilter[] = [];
 	const phrases: string[] = [];
 	const frontmatter: Record<string, string> = {};
@@ -46,20 +52,64 @@ export function parseQuery(raw: string): ParsedQuery {
 		return "";
 	});
 
+	// Extract line queries: line:(term1 term2) — parenthesised groups first
+	text = text.replace(/line:\(([^)]+)\)/gi, (_match, content: string) => {
+		const terms = content.trim().split(/\s+/).filter((t) => t.length > 0);
+		if (terms.length > 0) lineQueries.push(terms);
+		return "";
+	});
+	// line:singleterm
+	text = text.replace(/line:([^\s]+)/gi, (_match, term: string) => {
+		lineQueries.push([term]);
+		return "";
+	});
+
+	// Extract section queries: section:(term1 term2)
+	text = text.replace(/section:\(([^)]+)\)/gi, (_match, content: string) => {
+		const terms = content.trim().split(/\s+/).filter((t) => t.length > 0);
+		if (terms.length > 0) sectionQueries.push(terms);
+		return "";
+	});
+	// section:singleterm
+	text = text.replace(/section:([^\s]+)/gi, (_match, term: string) => {
+		sectionQueries.push([term]);
+		return "";
+	});
+
 	// Extract path filters: path:some/folder
-	text = text.replace(/path:([^\s]+)/g, (_match, path: string) => {
+	text = text.replace(/path:([^\s]+)/gi, (_match, path: string) => {
 		paths.push(path);
 		return "";
 	});
 
 	// Extract folder filters: folder:some/folder (alias for path:)
-	text = text.replace(/folder:([^\s]+)/g, (_match, path: string) => {
+	text = text.replace(/folder:([^\s]+)/gi, (_match, path: string) => {
 		paths.push(path);
 		return "";
 	});
 
+	// Extract file name filters: file:term
+	text = text.replace(/file:([^\s]+)/gi, (_match, term: string) => {
+		fileTerms.push(term);
+		return "";
+	});
+
+	// Extract title filters: title:term (alias for file:)
+	text = text.replace(/title:([^\s]+)/gi, (_match, term: string) => {
+		fileTerms.push(term);
+		return "";
+	});
+
+	// Extract tag prefix filters: tag:term or tag:#term
+	text = text.replace(/tag:([^\s]+)/gi, (_match, term: string) => {
+		// Strip leading # if present
+		const tag = term.startsWith("#") ? term.slice(1) : term;
+		if (tag.length > 0) tags.push(tag);
+		return "";
+	});
+
 	// Extract heading filters: heading:term
-	text = text.replace(/heading:([^\s]+)/g, (_match, term: string) => {
+	text = text.replace(/heading:([^\s]+)/gi, (_match, term: string) => {
 		headingTerms.push(term);
 		return "";
 	});
@@ -89,6 +139,12 @@ export function parseQuery(raw: string): ParsedQuery {
 		},
 	);
 
+	// Extract [property]:value or [property] frontmatter filters
+	text = text.replace(/\[([^\]]+)\]:?(\S*)/g, (_match, key: string, value: string) => {
+		frontmatter[key] = value || "";
+		return "";
+	});
+
 	// Extract frontmatter property filters: key:value (any remaining word:word pattern)
 	text = text.replace(/([a-zA-Z_][a-zA-Z0-9_]*):([^\s]+)/g, (_match, key: string, value: string) => {
 		if (RESERVED_PREFIXES.has(key.toLowerCase())) {
@@ -115,7 +171,10 @@ export function parseQuery(raw: string): ParsedQuery {
 		excludedTags,
 		excludedTerms,
 		paths,
+		fileTerms,
 		headingTerms,
+		lineQueries,
+		sectionQueries,
 		frontmatter,
 		dateFilters,
 		useSemantic: false,

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "preact/hooks";
-import type { App } from "obsidian";
+import { TFile, MarkdownView, type App, type WorkspaceLeaf } from "obsidian";
 import type AISearchPlugin from "../main";
 import type { SearchResult, SearchViewState } from "../types";
 import type { AISearchView } from "./search-view";
@@ -8,6 +8,7 @@ import { DEBOUNCE_MS, MAX_SEARCH_HISTORY } from "../constants";
 import { buildPrompt } from "../claude/prompt-builder";
 import { ClaudeClient } from "../claude/claude-client";
 import { ConsentManager } from "../claude/consent-manager";
+import { highlightAndScrollToMatch } from "../utils/editor-highlight";
 import { SearchInput } from "./components/SearchInput";
 import { ResultList } from "./components/ResultList";
 import { ProgressBar } from "./components/ProgressBar";
@@ -43,6 +44,7 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 	const [suggestionType, setSuggestionType] = useState<"tag" | "folder" | null>(null);
 	const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const inputRef = useRef<HTMLInputElement>(null);
+	const targetLeafRef = useRef<WorkspaceLeaf | null>(null);
 
 	// Update view title when results change
 	useEffect(() => {
@@ -133,12 +135,60 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 		});
 	}, [state.query, handleSearch]);
 
+	const searchTerms = useMemo(() => {
+		const parsed = parseQuery(state.query);
+		const terms = parsed.text
+			.split(/\s+/)
+			.filter((t) => t.length > 0);
+		// Add individual words from phrases for highlighting
+		for (const phrase of parsed.phrases) {
+			for (const word of phrase.split(/\s+/)) {
+				if (word.length > 0 && !terms.includes(word)) {
+					terms.push(word);
+				}
+			}
+		}
+		return terms;
+	}, [state.query]);
+
+	const openResultWithHighlight = useCallback(
+		async (path: string, newTab: boolean) => {
+			const file = app.vault.getAbstractFileByPath(path);
+			if (!(file instanceof TFile)) return;
+			let leaf: WorkspaceLeaf;
+			if (newTab) {
+				leaf = app.workspace.getLeaf("tab");
+			} else {
+				const cached = targetLeafRef.current;
+				// Check if the cached leaf is still alive in the DOM
+				const isAlive = cached
+					&& (cached as any).containerEl?.isConnected === true;
+				if (isAlive) {
+					leaf = cached;
+				} else {
+					leaf = app.workspace.getLeaf("tab");
+					targetLeafRef.current = leaf;
+				}
+			}
+			await leaf.openFile(file);
+
+			// Wait for editor to initialize, then highlight + scroll
+			setTimeout(() => {
+				const mdView = leaf.view;
+				if (mdView instanceof MarkdownView) {
+					highlightAndScrollToMatch(mdView, searchTerms);
+				}
+			}, 100);
+		},
+		[app, searchTerms],
+	);
+
 	const handleResultClick = useCallback(
 		(result: SearchResult, e: MouseEvent) => {
 			const newTab = e.ctrlKey || e.metaKey || e.button === 1;
-			void app.workspace.openLinkText(result.path, "", newTab);
+			void openResultWithHighlight(result.path, newTab);
 		},
-		[app],
+		[openResultWithHighlight],
 	);
 
 	const handleResultHover = useCallback(
@@ -158,6 +208,12 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 	// Keyboard navigation
 	const handleKeyDown = useCallback(
 		(e: KeyboardEvent) => {
+			// Enter with no selected result: dismiss mobile keyboard
+			if (e.key === "Enter" && selectedIndex < 0) {
+				inputRef.current?.blur();
+				return;
+			}
+
 			const resultCount = state.results.length;
 			if (resultCount === 0) return;
 
@@ -173,14 +229,14 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 				const result = sorted[selectedIndex];
 				if (result) {
 					const newTab = e.ctrlKey || e.metaKey;
-					void app.workspace.openLinkText(result.path, "", newTab);
+					void openResultWithHighlight(result.path, newTab);
 				}
 			} else if (e.key === "Escape") {
 				setSelectedIndex(-1);
 				inputRef.current?.focus();
 			}
 		},
-		[state.results.length, selectedIndex, app],
+		[state.results.length, selectedIndex, openResultWithHighlight],
 	);
 
 	// Auto-suggest: detect # or path:/folder: context
@@ -251,6 +307,23 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 		[state.query, suggestionType, handleSearch],
 	);
 
+	const handleClear = useCallback(() => {
+		if (searchTimeout.current) {
+			clearTimeout(searchTimeout.current);
+		}
+		setState((prev) => ({
+			...prev,
+			query: "",
+			results: [],
+			isSearching: false,
+			aiSummary: null,
+			error: null,
+		}));
+		setSelectedIndex(-1);
+		setShowSuggestions(false);
+		inputRef.current?.focus();
+	}, []);
+
 	const handleInputFocus = useCallback(() => {
 		if (state.query.trim().length === 0 && plugin.settings.searchHistory.length > 0) {
 			setShowHistory(true);
@@ -300,9 +373,27 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 		setState((prev) => ({ ...prev, error: null }));
 
 		try {
+			// Filter out results from AI-excluded folders
+			const aiExcluded = plugin.settings.aiExcludedFolders;
+			const filteredResults = aiExcluded.length > 0
+				? state.results.filter((r) =>
+					!aiExcluded.some((folder) => {
+						const f = folder.toLowerCase();
+						const rf = r.folder.toLowerCase();
+						return rf === f || rf.startsWith(f + "/");
+					}),
+				)
+				: state.results;
+
+			if (filteredResults.length === 0) {
+				setState((prev) => ({ ...prev, error: "No results remain after excluding AI-restricted folders." }));
+				setIsAskingAI(false);
+				return;
+			}
+
 			const request = buildPrompt(
 				state.query,
-				state.results,
+				filteredResults,
 				plugin.settings.maxContextTokens,
 				aiQuestion,
 			);
@@ -372,22 +463,6 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 		return sorted;
 	}, [state.results, sortOrder]);
 
-	const searchTerms = useMemo(() => {
-		const parsed = parseQuery(state.query);
-		const terms = parsed.text
-			.split(/\s+/)
-			.filter((t) => t.length > 0);
-		// Add individual words from phrases for highlighting
-		for (const phrase of parsed.phrases) {
-			for (const word of phrase.split(/\s+/)) {
-				if (word.length > 0 && !terms.includes(word)) {
-					terms.push(word);
-				}
-			}
-		}
-		return terms;
-	}, [state.query]);
-
 	const showAIButton =
 		plugin.settings.enableAI &&
 		plugin.settings.claudeApiKey.length > 0 &&
@@ -401,11 +476,27 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 				<SearchInput
 					value={state.query}
 					onInput={handleInputChange}
+					onClear={handleClear}
 					onFocus={handleInputFocus}
 					onBlur={handleInputBlur}
 					isSearching={state.isSearching}
 					inputRef={inputRef}
 				/>
+				{plugin.settings.searchHistory.length > 0 && (
+					<button
+						class="ai-search-history-btn"
+						title="Search history"
+						onMouseDown={(e) => {
+							e.preventDefault();
+							setShowHistory((prev) => !prev);
+						}}
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<circle cx="12" cy="12" r="10"/>
+							<polyline points="12 6 12 12 16 14"/>
+						</svg>
+					</button>
+				)}
 				{canPin && (
 					<button
 						class="ai-search-pin-btn"
@@ -423,14 +514,29 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 					title="Search syntax help"
 					onClick={() => setShowSyntaxHelp((prev) => !prev)}
 				>
-					?
+					<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<circle cx="12" cy="12" r="10"/>
+						<line x1="12" y1="16" x2="12" y2="12"/>
+						<line x1="12" y1="8" x2="12.01" y2="8"/>
+					</svg>
 				</button>
 			</div>
 
 			{/* Search history dropdown */}
 			{showHistory && plugin.settings.searchHistory.length > 0 && (
 				<div class="ai-search-dropdown">
-					<div class="ai-search-dropdown-header">Recent searches</div>
+					<div class="ai-search-dropdown-header">
+						<span>History</span>
+						<span
+							class="ai-search-dropdown-close"
+							onMouseDown={(e) => {
+								e.preventDefault();
+								setShowHistory(false);
+							}}
+						>
+							&times;
+						</span>
+					</div>
 					{plugin.settings.searchHistory.map((query) => (
 						<div
 							key={query}
@@ -464,16 +570,28 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 			{/* Syntax help panel */}
 			{showSyntaxHelp && (
 				<div class="ai-search-syntax-help">
-					<div class="ai-search-syntax-row"><code>"exact phrase"</code> Exact phrase match</div>
-					<div class="ai-search-syntax-row"><code>#tag</code> Filter by tag</div>
-					<div class="ai-search-syntax-row"><code>-#tag</code> Exclude tag</div>
-					<div class="ai-search-syntax-row"><code>-word</code> Exclude word</div>
-					<div class="ai-search-syntax-row"><code>path:folder</code> Filter by folder</div>
-					<div class="ai-search-syntax-row"><code>folder:name</code> Alias for path:</div>
-					<div class="ai-search-syntax-row"><code>heading:term</code> Filter by heading</div>
-					<div class="ai-search-syntax-row"><code>property:value</code> Filter by frontmatter</div>
-					<div class="ai-search-syntax-row"><code>created:&gt;2024-01-01</code> Created after date</div>
-					<div class="ai-search-syntax-row"><code>modified:&lt;2024-01-01</code> Modified before date</div>
+					<div class="ai-search-syntax-help-header">
+						<span>Search options</span>
+						<span
+							class="ai-search-dropdown-close"
+							onMouseDown={(e) => {
+								e.preventDefault();
+								setShowSyntaxHelp(false);
+							}}
+						>
+							&times;
+						</span>
+					</div>
+					<div class="ai-search-syntax-row"><code>path:</code> match path of the file</div>
+					<div class="ai-search-syntax-row"><code>file:</code> match file name</div>
+					<div class="ai-search-syntax-row"><code>tag:</code> search for tags</div>
+					<div class="ai-search-syntax-row"><code>line:</code> search keywords on same line</div>
+					<div class="ai-search-syntax-row"><code>section:</code> search keywords under same heading</div>
+					<div class="ai-search-syntax-row"><code>[property]</code> match property</div>
+					<div class="ai-search-syntax-row"><code>"exact phrase"</code> exact phrase match</div>
+					<div class="ai-search-syntax-row"><code>-word</code> exclude word</div>
+					<div class="ai-search-syntax-row"><code>created:&gt;date</code> created after date</div>
+					<div class="ai-search-syntax-row"><code>modified:&lt;date</code> modified before date</div>
 				</div>
 			)}
 

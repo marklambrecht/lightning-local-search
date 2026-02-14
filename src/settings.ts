@@ -239,6 +239,25 @@ export class AISearchSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		new Setting(containerEl)
+			.setName("AI excluded folders")
+			.setDesc(
+				"Comma-separated list of folders whose notes will not be " +
+					"sent as context when using Ask AI",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("private, journal")
+					.setValue(this.plugin.settings.aiExcludedFolders.join(", "))
+					.onChange(async (value) => {
+						this.plugin.settings.aiExcludedFolders = value
+							.split(",")
+							.map((s) => s.trim())
+							.filter((s) => s.length > 0);
+						await this.plugin.saveSettings();
+					}),
+			);
+
 		// ── Privacy settings ──
 		new Setting(containerEl).setName("Privacy").setHeading();
 
