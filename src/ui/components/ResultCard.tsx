@@ -18,11 +18,16 @@ function highlightTerms(
 	if (terms.length === 0) return text;
 
 	const escaped = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-	const pattern = new RegExp(`(${escaped.join("|")})`, "gi");
-	const parts = text.split(pattern);
+	// Split keeps the matched delimiters as separate parts (capturing group).
+	// Use a separate anchored, NON-global regex to test each part — a global
+	// regex's `.test()` is stateful (advances lastIndex), which would skip
+	// matches on alternating calls and highlight the wrong fragments.
+	const splitter = new RegExp(`(${escaped.join("|")})`, "gi");
+	const tester = new RegExp(`^(?:${escaped.join("|")})$`, "i");
+	const parts = text.split(splitter);
 
 	return parts.map((part, i) =>
-		pattern.test(part) ? (
+		tester.test(part) ? (
 			<mark key={i} class="ai-search-highlight">
 				{part}
 			</mark>
@@ -79,7 +84,7 @@ export function ResultCard({
 							viewBox="0 0 24 24"
 							fill="none"
 							stroke="currentColor"
-							stroke-width="2"
+							stroke-width={2}
 							stroke-linecap="round"
 							stroke-linejoin="round"
 						>

@@ -7,6 +7,7 @@ import { SearchViewRoot } from "./search-view-root";
 export class AISearchView extends ItemView {
 	private plugin: AISearchPlugin;
 	private resultCount = 0;
+	clearSearchCallback: (() => void) | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: AISearchPlugin) {
 		super(leaf);
@@ -32,6 +33,14 @@ export class AISearchView extends ItemView {
 
 	getIcon(): string {
 		return "search";
+	}
+
+	focusSearchInput(): void {
+		const input = this.containerEl.querySelector<HTMLInputElement>(".ai-search-input");
+		if (input && document.activeElement !== input) {
+			this.clearSearchCallback?.();
+			input.focus();
+		}
 	}
 
 	async onOpen(): Promise<void> {

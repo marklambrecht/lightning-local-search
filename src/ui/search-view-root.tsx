@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "preact/hooks";
-import { TFile, MarkdownView, type App, type WorkspaceLeaf } from "obsidian";
+import { TFile, MarkdownView, setIcon, type App, type WorkspaceLeaf } from "obsidian";
 import type AISearchPlugin from "../main";
 import type { SearchResult, SearchViewState } from "../types";
 import type { AISearchView } from "./search-view";
@@ -13,6 +13,16 @@ import { SearchInput } from "./components/SearchInput";
 import { ResultList } from "./components/ResultList";
 import { ProgressBar } from "./components/ProgressBar";
 import { AISummary } from "./components/AISummary";
+
+function ObsidianIcon({ icon }: { icon: string }) {
+	const ref = useRef<HTMLSpanElement>(null);
+	useEffect(() => {
+		if (ref.current) {
+			setIcon(ref.current, icon);
+		}
+	}, [icon]);
+	return <span ref={ref} class="ai-search-icon" />;
+}
 
 interface SearchViewRootProps {
 	plugin: AISearchPlugin;
@@ -34,10 +44,11 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 
 	const [isAskingAI, setIsAskingAI] = useState(false);
 	const [aiQuestion, setAiQuestion] = useState("");
-	const [sortOrder, setSortOrder] = useState("relevance");
+	const [sortOrder, setSortOrder] = useState("modified-new");
 	const [caseSensitive, setCaseSensitive] = useState(false);
 	const [selectedIndex, setSelectedIndex] = useState(-1);
 	const [showHistory, setShowHistory] = useState(false);
+	const [selectedHistoryIndex, setSelectedHistoryIndex] = useState(-1);
 	const [showSyntaxHelp, setShowSyntaxHelp] = useState(false);
 	const [showSuggestions, setShowSuggestions] = useState(false);
 	const [suggestionItems, setSuggestionItems] = useState<string[]>([]);
@@ -45,6 +56,45 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 	const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const inputRef = useRef<HTMLInputElement>(null);
 	const targetLeafRef = useRef<WorkspaceLeaf | null>(null);
+
+	// Auto-focus the search input when the view opens
+	useEffect(() => {
+		// Small delay lets the view finish rendering before focusing
+		const timer = setTimeout(() => inputRef.current?.focus(), 50);
+		return () => clearTimeout(timer);
+	}, []);
+
+	// Clear any pending debounced search when the view unmounts, otherwise the
+	// timer fires after teardown and calls setState on an unmounted component.
+	useEffect(() => {
+		return () => {
+			if (searchTimeout.current) {
+				clearTimeout(searchTimeout.current);
+			}
+		};
+	}, []);
+
+	// Register a callback so the view can clear the search bar externally
+	useEffect(() => {
+		view.clearSearchCallback = () => {
+			if (searchTimeout.current) {
+				clearTimeout(searchTimeout.current);
+			}
+			setState((prev) => ({
+				...prev,
+				query: "",
+				results: [],
+				isSearching: false,
+				aiSummary: null,
+				error: null,
+			}));
+			setSelectedIndex(-1);
+			setShowSuggestions(false);
+		};
+		return () => {
+			view.clearSearchCallback = null;
+		};
+	}, [view]);
 
 	// Update view title when results change
 	useEffect(() => {
@@ -105,9 +155,6 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 							isSearching: false,
 							error: null,
 						}));
-
-						// Add to history after successful search
-						addToHistory(query);
 					} catch (err) {
 						setState((prev) => ({
 							...prev,
@@ -121,19 +168,28 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 				})();
 			}, DEBOUNCE_MS.search);
 		},
-		[plugin, caseSensitive, addToHistory],
+		[plugin, caseSensitive],
 	);
 
 	const handleToggleCaseSensitive = useCallback(() => {
-		setCaseSensitive((prev) => {
-			const next = !prev;
-			// Re-trigger search with new case sensitivity
-			if (state.query.trim().length > 0) {
-				handleSearch(state.query);
-			}
-			return next;
-		});
-	}, [state.query, handleSearch]);
+		setCaseSensitive((prev) => !prev);
+	}, []);
+
+	// Re-run the search when case sensitivity changes. This must be an effect
+	// (not inline in the toggle handler) so that `handleSearch` has already been
+	// recreated with the NEW `caseSensitive` value before it runs — otherwise
+	// the re-search would use the stale value and require a second toggle.
+	const didMountCase = useRef(false);
+	useEffect(() => {
+		if (!didMountCase.current) {
+			didMountCase.current = true;
+			return;
+		}
+		if (state.query.trim().length > 0) {
+			handleSearch(state.query);
+		}
+		// Intentionally only re-run on case-sensitivity change.
+	}, [caseSensitive]);
 
 	const searchTerms = useMemo(() => {
 		const parsed = parseQuery(state.query);
@@ -160,10 +216,13 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 				leaf = app.workspace.getLeaf("tab");
 			} else {
 				const cached = targetLeafRef.current;
-				// Check if the cached leaf is still alive in the DOM
-				const isAlive = cached
-					&& (cached as any).containerEl?.isConnected === true;
-				if (isAlive) {
+				// Check if the cached leaf is still alive and usable
+				// (another plugin like Better Export PDF can take over the tab)
+				const viewType = cached?.view?.getViewType?.();
+				const isUsable = cached
+					&& (cached as any).containerEl?.isConnected === true
+					&& (viewType === "markdown" || viewType === "empty");
+				if (isUsable) {
 					leaf = cached;
 				} else {
 					leaf = app.workspace.getLeaf("tab");
@@ -186,9 +245,10 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 	const handleResultClick = useCallback(
 		(result: SearchResult, e: MouseEvent) => {
 			const newTab = e.ctrlKey || e.metaKey || e.button === 1;
+			addToHistory(state.query);
 			void openResultWithHighlight(result.path, newTab);
 		},
-		[openResultWithHighlight],
+		[openResultWithHighlight, addToHistory, state.query],
 	);
 
 	const handleResultHover = useCallback(
@@ -205,9 +265,45 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 		[app, view],
 	);
 
+	const handleHistorySelect = useCallback(
+		(query: string) => {
+			setShowHistory(false);
+			setSelectedHistoryIndex(-1);
+			handleSearch(query);
+		},
+		[handleSearch],
+	);
+
 	// Keyboard navigation
 	const handleKeyDown = useCallback(
 		(e: KeyboardEvent) => {
+			// History dropdown navigation
+			if (showHistory && plugin.settings.searchHistory.length > 0) {
+				const historyCount = plugin.settings.searchHistory.length;
+				if (e.key === "ArrowDown") {
+					e.preventDefault();
+					setSelectedHistoryIndex((prev) => Math.min(prev + 1, historyCount - 1));
+					return;
+				} else if (e.key === "ArrowUp") {
+					e.preventDefault();
+					setSelectedHistoryIndex((prev) => Math.max(prev - 1, -1));
+					return;
+				} else if (e.key === "Enter" && selectedHistoryIndex >= 0) {
+					e.preventDefault();
+					const query = plugin.settings.searchHistory[selectedHistoryIndex];
+					if (query) {
+						setSelectedHistoryIndex(-1);
+						handleHistorySelect(query);
+					}
+					return;
+				} else if (e.key === "Escape") {
+					e.preventDefault();
+					setShowHistory(false);
+					setSelectedHistoryIndex(-1);
+					return;
+				}
+			}
+
 			// Enter with no selected result: dismiss mobile keyboard
 			if (e.key === "Enter" && selectedIndex < 0) {
 				inputRef.current?.blur();
@@ -228,6 +324,7 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 				const sorted = sortedResults;
 				const result = sorted[selectedIndex];
 				if (result) {
+					addToHistory(state.query);
 					const newTab = e.ctrlKey || e.metaKey;
 					void openResultWithHighlight(result.path, newTab);
 				}
@@ -236,7 +333,7 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 				inputRef.current?.focus();
 			}
 		},
-		[state.results.length, selectedIndex, openResultWithHighlight],
+		[state.results.length, selectedIndex, openResultWithHighlight, addToHistory, state.query, showHistory, selectedHistoryIndex, plugin.settings.searchHistory, handleHistorySelect],
 	);
 
 	// Auto-suggest: detect # or path:/folder: context
@@ -325,26 +422,22 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 	}, []);
 
 	const handleInputFocus = useCallback(() => {
-		if (state.query.trim().length === 0 && plugin.settings.searchHistory.length > 0) {
+		if (plugin.settings.searchHistory.length > 0) {
 			setShowHistory(true);
+			setSelectedHistoryIndex(-1);
 		}
-	}, [state.query, plugin.settings.searchHistory.length]);
+	}, [plugin.settings.searchHistory.length]);
 
 	const handleInputBlur = useCallback(() => {
 		// Delay to allow click on history/suggestion items
 		setTimeout(() => {
 			setShowHistory(false);
+			setSelectedHistoryIndex(-1);
 			setShowSuggestions(false);
 		}, 200);
 	}, []);
 
-	const handleHistorySelect = useCallback(
-		(query: string) => {
-			setShowHistory(false);
-			handleSearch(query);
-		},
-		[handleSearch],
-	);
+
 
 	const handlePinQuery = useCallback(() => {
 		const trimmed = state.query.trim();
@@ -386,7 +479,10 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 				: state.results;
 
 			if (filteredResults.length === 0) {
-				setState((prev) => ({ ...prev, error: "No results remain after excluding AI-restricted folders." }));
+				setState((prev) => ({
+					...prev,
+					aiSummary: "All search results are in folders excluded from AI (see Settings > Lightning Local Search > AI excluded folders). To use Ask AI, adjust your search or exclusion settings so that at least one result comes from a non-excluded folder.",
+				}));
 				setIsAskingAI(false);
 				return;
 			}
@@ -472,16 +568,16 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 
 	return (
 		<div class="ai-search-container" onKeyDown={handleKeyDown}>
-			<div class="ai-search-input-row">
-				<SearchInput
-					value={state.query}
-					onInput={handleInputChange}
-					onClear={handleClear}
-					onFocus={handleInputFocus}
-					onBlur={handleInputBlur}
-					isSearching={state.isSearching}
-					inputRef={inputRef}
-				/>
+			<SearchInput
+				value={state.query}
+				onInput={handleInputChange}
+				onClear={handleClear}
+				onFocus={handleInputFocus}
+				onBlur={handleInputBlur}
+				isSearching={state.isSearching}
+				inputRef={inputRef}
+			/>
+			<div class="ai-search-actions-row">
 				{plugin.settings.searchHistory.length > 0 && (
 					<button
 						class="ai-search-history-btn"
@@ -491,10 +587,7 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 							setShowHistory((prev) => !prev);
 						}}
 					>
-						<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-							<circle cx="12" cy="12" r="10"/>
-							<polyline points="12 6 12 12 16 14"/>
-						</svg>
+						<ObsidianIcon icon="clock" />
 					</button>
 				)}
 				{canPin && (
@@ -503,10 +596,7 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 						title="Pin this query"
 						onClick={handlePinQuery}
 					>
-						<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-							<line x1="12" y1="17" x2="12" y2="22" />
-							<path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z" />
-						</svg>
+						<ObsidianIcon icon="pin" />
 					</button>
 				)}
 				<button
@@ -514,11 +604,7 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 					title="Search syntax help"
 					onClick={() => setShowSyntaxHelp((prev) => !prev)}
 				>
-					<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-						<circle cx="12" cy="12" r="10"/>
-						<line x1="12" y1="16" x2="12" y2="12"/>
-						<line x1="12" y1="8" x2="12.01" y2="8"/>
-					</svg>
+					<ObsidianIcon icon="info" />
 				</button>
 			</div>
 
@@ -537,10 +623,10 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 							&times;
 						</span>
 					</div>
-					{plugin.settings.searchHistory.map((query) => (
+					{plugin.settings.searchHistory.map((query, index) => (
 						<div
 							key={query}
-							class="ai-search-dropdown-item"
+							class={`ai-search-dropdown-item${index === selectedHistoryIndex ? " ai-search-dropdown-item-selected" : ""}`}
 							onMouseDown={() => handleHistorySelect(query)}
 						>
 							{query}

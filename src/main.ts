@@ -1,4 +1,4 @@
-import { Notice, Platform, Plugin } from "obsidian";
+import { Notice, Platform, Plugin, type WorkspaceLeaf } from "obsidian";
 import type { AISearchSettings } from "./types";
 import { COMMAND_IDS, DEFAULT_SETTINGS, VIEW_TYPE_AI_SEARCH } from "./constants";
 import { AISearchSettingTab } from "./settings";
@@ -181,18 +181,22 @@ export default class AISearchPlugin extends Plugin {
 	private async activateSidebarView(): Promise<void> {
 		const existing =
 			this.app.workspace.getLeavesOfType(VIEW_TYPE_AI_SEARCH);
+		let leaf: WorkspaceLeaf | null = null;
 		if (existing.length > 0 && existing[0]) {
-			await this.app.workspace.revealLeaf(existing[0]);
-			return;
-		}
-
-		const leaf = this.app.workspace.getRightLeaf(false);
-		if (leaf) {
-			await leaf.setViewState({
-				type: VIEW_TYPE_AI_SEARCH,
-				active: true,
-			});
+			leaf = existing[0];
 			await this.app.workspace.revealLeaf(leaf);
+		} else {
+			leaf = this.app.workspace.getRightLeaf(false);
+			if (leaf) {
+				await leaf.setViewState({
+					type: VIEW_TYPE_AI_SEARCH,
+					active: true,
+				});
+				await this.app.workspace.revealLeaf(leaf);
+			}
+		}
+		if (leaf?.view instanceof AISearchView) {
+			leaf.view.focusSearchInput();
 		}
 	}
 
@@ -203,6 +207,9 @@ export default class AISearchPlugin extends Plugin {
 			active: true,
 		});
 		this.app.workspace.revealLeaf(leaf);
+		if (leaf.view instanceof AISearchView) {
+			leaf.view.focusSearchInput();
+		}
 	}
 
 	private async triggerReindex(): Promise<void> {

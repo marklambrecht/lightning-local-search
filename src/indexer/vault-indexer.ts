@@ -106,9 +106,7 @@ export class VaultIndexer {
 	}
 
 	private getIndexableFiles(): TFile[] {
-		return this.app.vault
-			.getMarkdownFiles()
-			.filter((f) => !this.isExcluded(f));
+		return this.app.vault.getMarkdownFiles().filter((f) => !this.isExcluded(f));
 	}
 
 	private isExcluded(file: TFile): boolean {

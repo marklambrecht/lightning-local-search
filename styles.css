@@ -24,8 +24,8 @@
 
 .ai-search-input {
 	width: 100%;
-	padding: 8px 32px 8px 12px;
-	border: 1px solid #ccc;
+	padding: 10px 32px 10px 12px;
+	border: 1.5px solid #999;
 	border-radius: var(--radius-s);
 	background-color: #ffffff !important;
 	color: #000000 !important;
@@ -46,7 +46,7 @@
 .ai-search-input:focus {
 	border-color: var(--interactive-accent);
 	outline: none;
-	box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
+	box-shadow: 0 0 0 2px rgba(var(--interactive-accent-rgb, 72, 120, 220), 0.25);
 }
 
 .ai-search-clear-btn {
@@ -159,10 +159,16 @@
 	border-left: 3px solid transparent;
 }
 
-.ai-search-result-card:hover,
 .ai-search-result-selected {
 	background: var(--background-modifier-hover);
 	border-left-color: var(--interactive-accent);
+}
+
+@media (hover: hover) {
+	.ai-search-result-card:hover {
+		background: var(--background-modifier-hover);
+		border-left-color: var(--interactive-accent);
+	}
 }
 
 .ai-search-result-card:focus-visible {
@@ -210,17 +216,23 @@
 	border-radius: var(--radius-s);
 	color: var(--text-faint);
 	cursor: pointer;
-	opacity: 0;
+	opacity: 1;
 	transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
 }
 
-.ai-search-result-card:hover .ai-search-preview-icon {
-	opacity: 1;
-}
+@media (hover: hover) {
+	.ai-search-preview-icon {
+		opacity: 0;
+	}
 
-.ai-search-preview-icon:hover {
-	color: var(--text-accent);
-	background: var(--background-modifier-hover);
+	.ai-search-result-card:hover .ai-search-preview-icon {
+		opacity: 1;
+	}
+
+	.ai-search-preview-icon:hover {
+		color: var(--text-accent);
+		background: var(--background-modifier-hover);
+	}
 }
 
 .ai-search-result-path {
@@ -348,6 +360,17 @@
 	font-size: var(--font-ui-smaller);
 }
 
+/* ─── AI notice (non-error informational) ─────────────────────── */
+.ai-search-notice {
+	padding: 8px 10px;
+	background: var(--background-secondary);
+	color: var(--text-muted);
+	border-radius: var(--radius-s);
+	border-left: 3px solid var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.4;
+}
+
 /* ─── AI question section ─────────────────────────────────────── */
 .ai-search-ai-section {
 	display: flex;
@@ -420,15 +443,11 @@
 	margin-top: 16px;
 }
 
-/* ─── Input row (input + pin + help buttons) ──────────────────── */
-.ai-search-input-row {
+/* ─── Actions row (history + pin + help buttons) ─────────────── */
+.ai-search-actions-row {
 	display: flex;
 	align-items: center;
 	gap: 4px;
-}
-
-.ai-search-input-row .ai-search-input-container {
-	flex: 1;
 }
 
 .ai-search-pin-btn,
@@ -448,6 +467,21 @@
 	font-size: var(--font-ui-small);
 	font-weight: var(--font-semibold);
 	padding: 0;
+}
+
+/* Icon sizing inside action buttons (uses Obsidian setIcon) */
+.ai-search-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.ai-search-pin-btn svg,
+.ai-search-help-btn svg,
+.ai-search-history-btn svg {
+	width: 14px;
+	height: 14px;
+	stroke: currentColor;
 }
 
 .ai-search-pin-btn:hover,
@@ -498,7 +532,8 @@
 	white-space: nowrap;
 }
 
-.ai-search-dropdown-item:hover {
+.ai-search-dropdown-item:hover,
+.ai-search-dropdown-item-selected {
 	background: var(--background-modifier-hover);
 }
 

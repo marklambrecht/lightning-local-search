@@ -136,24 +136,21 @@ export class OramaIndex {
 		const hasLineQueries = query.lineQueries.length > 0;
 		const hasSectionQueries = query.sectionQueries.length > 0;
 		const hasFrontmatter = Object.keys(query.frontmatter).length > 0;
-		const needsPostFilter = hasPhrases || hasPaths || (caseSensitive && hasTextTerms)
-			|| hasExcludedTerms || hasExcludedTags || hasFileTerms || hasHeadingTerms
-			|| hasLineQueries || hasSectionQueries || hasFrontmatter;
 
 		// Build Orama where clause (tags + dates only; paths use post-filter)
 		const whereClause = this.buildWhereClause(query);
 
-		// For phrase searches, send only the longest word from each phrase to Orama
-		// (the English tokenizer strips stop words and mis-stems non-English words).
-		// The post-filter handles exact phrase matching.
+		// For phrase searches, send all meaningful words from each phrase to Orama
+		// so the candidate set is broad enough. The post-filter handles exact
+		// phrase matching; we just need Orama to return relevant documents.
+		// Words ≤2 chars are skipped because Orama's English tokenizer typically
+		// drops them anyway (stemmer minimum token length).
 		let searchTerm: string;
 		if (hasPhrases) {
-			const longestPerPhrase = query.phrases.map((phrase) => {
-				const words = phrase.split(/\s+/).filter((w) => w.length > 2);
-				words.sort((a, b) => b.length - a.length);
-				return words[0] ?? "";
-			});
-			searchTerm = [query.text, ...longestPerPhrase]
+			const wordsPerPhrase = query.phrases.map((phrase) =>
+				phrase.split(/\s+/).filter((w) => w.length > 2).join(" "),
+			);
+			searchTerm = [query.text, ...wordsPerPhrase]
 				.filter(Boolean)
 				.join(" ")
 				.trim();
@@ -161,14 +158,27 @@ export class OramaIndex {
 			searchTerm = query.text;
 		}
 
+		// Feed filter terms into the search term so Orama returns candidate docs.
+		// Post-filters handle the precision (same-line, same-section, exact title, etc.).
+		const extraTerms: string[] = [];
+		if (hasLineQueries) extraTerms.push(...query.lineQueries.flat());
+		if (hasSectionQueries) extraTerms.push(...query.sectionQueries.flat());
+		if (hasFileTerms) extraTerms.push(...query.fileTerms);
+		if (hasHeadingTerms) extraTerms.push(...query.headingTerms);
+		if (extraTerms.length > 0) {
+			searchTerm = [searchTerm, ...extraTerms].filter(Boolean).join(" ").trim();
+		}
+
 		const hasFiltersOnly = searchTerm.length === 0 && (Object.keys(whereClause).length > 0
-			|| hasPaths || hasFileTerms || hasHeadingTerms || hasLineQueries
-			|| hasSectionQueries || hasFrontmatter);
+			|| hasPaths || hasFrontmatter);
 		if (hasFiltersOnly) searchTerm = "";
 		const where = Object.keys(whereClause).length > 0 ? whereClause : undefined;
 
-		// Request extra results when post-filtering will be applied
-		const searchLimit = needsPostFilter ? limit * 10 : limit;
+		// Orama uses OR matching (any term matches) with BM25 ranking.
+		// We need a large candidate pool because post-filtering enforces
+		// AND matching and other constraints. 1000 is cheap — BM25 scoring
+		// is fast and the real cost is in the post-filters that follow.
+		const searchLimit = 1000;
 
 		const searchOpts = {
 			term: searchTerm,
@@ -182,159 +192,215 @@ export class OramaIndex {
 			},
 		};
 
-		// Force exact matching when phrases are present; otherwise try fuzzy first
-		const useFuzzy = fuzzy && !hasPhrases && searchTerm.length > 4;
+		// Only enable fuzzy if every word in the query is long enough (>4 chars)
+		// to avoid false matches on short words like "Novo" matching "Note".
+		const searchWords = searchTerm.split(/\s+/).filter((w) => w.length > 0);
+		const useFuzzy = fuzzy && !hasPhrases && searchWords.length > 0
+			&& searchWords.every((w) => w.length > 4);
 
+		// Try exact search first for precision; fall back to fuzzy only if needed
 		let results = await search(this.db, {
 			...searchOpts,
-			tolerance: useFuzzy ? 1 : 0,
+			tolerance: 0,
 		});
 
 		if (results.hits.length === 0 && useFuzzy) {
 			results = await search(this.db, {
 				...searchOpts,
-				tolerance: 0,
+				tolerance: 1,
 			});
 		}
 
 		let hits = results.hits;
 
-		// Post-filter: path prefix matching (supports subfolders)
-		if (hasPaths) {
-			hits = hits.filter((hit) => {
-				const doc = hit.document as unknown as OramaDocument;
-				const docPath = doc.path.toLowerCase();
-				const docFolder = doc.folder?.toLowerCase() ?? "";
-				return query.paths.some((filterPath) => {
-					const fp = filterPath.toLowerCase();
-					return (
-						docFolder === fp ||
-						docFolder.startsWith(fp + "/") ||
-						docPath.startsWith(fp + "/") ||
-						docPath.startsWith(fp.toLowerCase())
-					);
-				});
-			});
-		}
+		// Collect ALL original query words (text + phrases) for AND filtering
+		// and title promotion. Checked against raw text, not stemmed tokens,
+		// so short words like "CA" work correctly.
+		const allQueryWords = [
+			...query.text.split(/\s+/),
+			...query.phrases.flatMap((p) => p.split(/\s+/)),
+		].filter((w) => w.length > 0);
 
-		// Post-filter: exact phrase matches
-		if (hasPhrases) {
-			hits = hits.filter((hit) => {
-				const doc = hit.document as unknown as OramaDocument;
-				const raw = `${doc.title} ${doc.content} ${doc.headings.join(" ")}`.replace(/\s+/g, " ");
-				const searchableText = caseSensitive ? raw : raw.toLowerCase();
-				return query.phrases.every((phrase) => {
-					const normalized = phrase.replace(/\s+/g, " ");
-					return searchableText.includes(caseSensitive ? normalized : normalized.toLowerCase());
-				});
-			});
-		}
+		// All post-filters below enforce AND semantics, so a hit must satisfy
+		// every active one. Running them as separate passes meant rebuilding and
+		// re-lowercasing the full `title + content + headings` haystack (the note
+		// body can be large) once per filter, per hit, on every keystroke.
+		//
+		// Instead, precompute the lowercased query needles once, then run a
+		// single filter pass that builds each document's haystack at most once
+		// (lazily, and lowercased at most once) and reuses it across checks.
+		const andActive = allQueryWords.length > 1;
+		const andNeedles = andActive
+			? allQueryWords.map((w) => (caseSensitive ? w : w.toLowerCase()))
+			: [];
+		const phraseNeedles = hasPhrases
+			? query.phrases.map((p) => {
+					const n = p.replace(/\s+/g, " ");
+					return caseSensitive ? n : n.toLowerCase();
+				})
+			: [];
+		const caseTextTerms = caseSensitive && hasTextTerms
+			? query.text.split(/\s+/).filter((t) => t.length > 0)
+			: [];
+		const excludedNeedles = hasExcludedTerms
+			? query.excludedTerms.map((t) => t.toLowerCase())
+			: [];
+		const fileNeedles = hasFileTerms
+			? query.fileTerms.map((t) => (caseSensitive ? t : t.toLowerCase()))
+			: [];
+		const headingNeedles = hasHeadingTerms
+			? query.headingTerms.map((t) => (caseSensitive ? t : t.toLowerCase()))
+			: [];
+		const lineNeedles = hasLineQueries
+			? query.lineQueries.map((terms) =>
+					terms.map((t) => (caseSensitive ? t : t.toLowerCase())),
+				)
+			: [];
+		const sectionNeedles = hasSectionQueries
+			? query.sectionQueries.map((terms) =>
+					terms.map((t) => (caseSensitive ? t : t.toLowerCase())),
+				)
+			: [];
+		const frontmatterEntries = hasFrontmatter
+			? Object.entries(query.frontmatter).map(
+					([k, v]) => [k.toLowerCase(), v.toLowerCase()] as const,
+				)
+			: [];
 
-		// Post-filter: case-sensitive matching for regular search terms
-		if (caseSensitive && hasTextTerms) {
-			const terms = query.text.split(/\s+/).filter((t) => t.length > 0);
-			hits = hits.filter((hit) => {
-				const doc = hit.document as unknown as OramaDocument;
-				const searchableText = `${doc.title} ${doc.content} ${doc.headings.join(" ")}`;
-				return terms.every((term) => searchableText.includes(term));
-			});
-		}
+		const needsPostFilter = andActive || hasPaths || hasPhrases
+			|| caseTextTerms.length > 0 || hasExcludedTerms || hasExcludedTags
+			|| hasFileTerms || hasHeadingTerms || hasLineQueries
+			|| hasSectionQueries || hasFrontmatter;
 
-		// Post-filter: negated terms — exclude results containing these words
-		if (hasExcludedTerms) {
+		if (needsPostFilter) {
 			hits = hits.filter((hit) => {
 				const doc = hit.document as unknown as OramaDocument;
-				const searchableText = `${doc.title} ${doc.content} ${doc.headings.join(" ")}`.toLowerCase();
-				return query.excludedTerms.every(
-					(term) => !searchableText.includes(term.toLowerCase()),
-				);
-			});
-		}
 
-		// Post-filter: negated tags — exclude results that have these tags
-		if (hasExcludedTags) {
-			hits = hits.filter((hit) => {
-				const doc = hit.document as unknown as OramaDocument;
-				return query.excludedTags.every(
-					(tag) => !doc.tags.some((t) => t.toLowerCase() === tag.toLowerCase()),
-				);
-			});
-		}
+				// Build the title+content+headings haystack once per hit; the
+				// lowercased form is computed at most once and only when needed.
+				const rawHaystack = `${doc.title} ${doc.content} ${doc.headings.join(" ")}`;
+				let lowerHaystack: string | null = null;
+				const lower = () =>
+					(lowerHaystack ??= rawHaystack.toLowerCase());
 
-		// Post-filter: file name terms — results must have a filename containing the term
-		if (hasFileTerms) {
-			hits = hits.filter((hit) => {
-				const doc = hit.document as unknown as OramaDocument;
-				const docTitle = caseSensitive ? doc.title : doc.title.toLowerCase();
-				return query.fileTerms.every((term) => {
-					const t = caseSensitive ? term : term.toLowerCase();
-					return docTitle.includes(t);
-				});
-			});
-		}
+				// AND semantics: every query word must appear somewhere.
+				if (andActive) {
+					const hay = caseSensitive ? rawHaystack : lower();
+					if (!andNeedles.every((w) => hay.includes(w))) return false;
+				}
 
-		// Post-filter: heading terms — results must have a heading containing the term
-		if (hasHeadingTerms) {
-			hits = hits.filter((hit) => {
-				const doc = hit.document as unknown as OramaDocument;
-				return query.headingTerms.every((term) => {
-					const t = caseSensitive ? term : term.toLowerCase();
-					return doc.headings.some((h) => {
-						const heading = caseSensitive ? h : h.toLowerCase();
-						return heading.includes(t);
+				// Path prefix matching (supports subfolders).
+				if (hasPaths) {
+					const docPath = doc.path.toLowerCase();
+					const docFolder = doc.folder?.toLowerCase() ?? "";
+					const ok = query.paths.some((filterPath) => {
+						const fp = filterPath.toLowerCase();
+						return (
+							docFolder === fp ||
+							docFolder.startsWith(fp + "/") ||
+							docPath.startsWith(fp + "/") ||
+							docPath.startsWith(fp)
+						);
 					});
-				});
+					if (!ok) return false;
+				}
+
+				// Exact phrase matches (whitespace collapsed).
+				if (hasPhrases) {
+					const collapsed = rawHaystack.replace(/\s+/g, " ");
+					const searchable = caseSensitive ? collapsed : collapsed.toLowerCase();
+					if (!phraseNeedles.every((p) => searchable.includes(p))) return false;
+				}
+
+				// Case-sensitive matching for regular search terms.
+				if (caseTextTerms.length > 0) {
+					if (!caseTextTerms.every((term) => rawHaystack.includes(term))) return false;
+				}
+
+				// Negated terms — exclude results containing these words.
+				if (hasExcludedTerms) {
+					const hay = lower();
+					if (excludedNeedles.some((t) => hay.includes(t))) return false;
+				}
+
+				// Negated tags — exclude results that have these tags.
+				if (hasExcludedTags) {
+					const ok = query.excludedTags.every(
+						(tag) => !doc.tags.some((t) => t.toLowerCase() === tag.toLowerCase()),
+					);
+					if (!ok) return false;
+				}
+
+				// File name terms — filename must contain every term.
+				if (hasFileTerms) {
+					const docTitle = caseSensitive ? doc.title : doc.title.toLowerCase();
+					if (!fileNeedles.every((t) => docTitle.includes(t))) return false;
+				}
+
+				// Heading terms — some heading must contain each term.
+				if (hasHeadingTerms) {
+					const headings = caseSensitive
+						? doc.headings
+						: doc.headings.map((h) => h.toLowerCase());
+					const ok = headingNeedles.every((t) =>
+						headings.some((h) => h.includes(t)),
+					);
+					if (!ok) return false;
+				}
+
+				// Line queries — all terms in each group on the same line.
+				if (hasLineQueries) {
+					const rawLines = doc.content.split("\n");
+					const lines = caseSensitive
+						? rawLines
+						: rawLines.map((l) => l.toLowerCase());
+					const ok = lineNeedles.every((terms) =>
+						lines.some((line) => terms.every((t) => line.includes(t))),
+					);
+					if (!ok) return false;
+				}
+
+				// Section queries — all terms under the same heading section.
+				if (hasSectionQueries) {
+					const rawSections = doc.content.split(/^(?=#{1,6} )/m);
+					const sections = caseSensitive
+						? rawSections
+						: rawSections.map((s) => s.toLowerCase());
+					const ok = sectionNeedles.every((terms) =>
+						sections.some((section) => terms.every((t) => section.includes(t))),
+					);
+					if (!ok) return false;
+				}
+
+				// Frontmatter property matches.
+				if (hasFrontmatter) {
+					const fm = doc.frontmatter.toLowerCase();
+					const ok = frontmatterEntries.every(([key, value]) => {
+						if (value === "") return fm.includes(`${key}:`);
+						return fm.includes(`${key}:${value}`);
+					});
+					if (!ok) return false;
+				}
+
+				return true;
 			});
 		}
 
-		// Post-filter: line queries — all terms in each group must appear on the same line
-		if (hasLineQueries) {
-			hits = hits.filter((hit) => {
-				const doc = hit.document as unknown as OramaDocument;
-				const lines = doc.content.split("\n");
-				return query.lineQueries.every((terms) =>
-					lines.some((line) => {
-						const l = caseSensitive ? line : line.toLowerCase();
-						return terms.every((term) => {
-							const t = caseSensitive ? term : term.toLowerCase();
-							return l.includes(t);
-						});
-					}),
-				);
-			});
-		}
-
-		// Post-filter: section queries — all terms must appear under the same heading section
-		if (hasSectionQueries) {
-			hits = hits.filter((hit) => {
-				const doc = hit.document as unknown as OramaDocument;
-				// Split content into sections by heading lines
-				const sections = doc.content.split(/^(?=#{1,6} )/m);
-				return query.sectionQueries.every((terms) =>
-					sections.some((section) => {
-						const s = caseSensitive ? section : section.toLowerCase();
-						return terms.every((term) => {
-							const t = caseSensitive ? term : term.toLowerCase();
-							return s.includes(t);
-						});
-					}),
-				);
-			});
-		}
-
-		// Post-filter: frontmatter property matches
-		if (hasFrontmatter) {
-			hits = hits.filter((hit) => {
-				const doc = hit.document as unknown as OramaDocument;
-				const fm = doc.frontmatter.toLowerCase();
-				return Object.entries(query.frontmatter).every(([key, value]) => {
-					if (value === "") {
-						// [property] without value — just check the key exists
-						return fm.includes(`${key.toLowerCase()}:`);
-					}
-					return fm.includes(`${key.toLowerCase()}:${value.toLowerCase()}`);
-				});
-			});
+		// Title-match guarantee: promote hits whose title contains ALL
+		// original query words so they are never pushed out by the limit.
+		const queryWords = allQueryWords.map((w) => w.toLowerCase());
+		if (queryWords.length > 0) {
+			const titleHits: typeof hits = [];
+			const otherHits: typeof hits = [];
+			for (const hit of hits) {
+				const title = (hit.document as unknown as OramaDocument).title.toLowerCase();
+				if (queryWords.every((w) => title.includes(w))) {
+					titleHits.push(hit);
+				} else {
+					otherHits.push(hit);
+				}
+			}
+			hits = [...titleHits, ...otherHits];
 		}
 
 		return hits.slice(0, limit).map((hit) => {
@@ -389,6 +455,11 @@ export class OramaIndex {
 	/** Get all unique folders known to the index */
 	getAllFolders(): string[] {
 		return [...this.knownFolders].sort();
+	}
+
+	/** Check if a file path exists in the index (for diagnostics) */
+	hasDocument(path: string): boolean {
+		return this.pathToId.has(path);
 	}
 
 	get documentCount(): number {
