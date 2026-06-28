@@ -26,7 +26,7 @@ export class IncrementalSync {
 	register(): void {
 		this.plugin.registerEvent(
 			this.plugin.app.vault.on("create", (file) => {
-				if (file instanceof TFile && file.extension === "md") {
+				if (file instanceof TFile && this.indexer.isIndexable(file)) {
 					this.pendingUpdates.set(file.path, file);
 					this.processPending();
 				}
@@ -35,7 +35,7 @@ export class IncrementalSync {
 
 		this.plugin.registerEvent(
 			this.plugin.app.vault.on("modify", (file) => {
-				if (file instanceof TFile && file.extension === "md") {
+				if (file instanceof TFile && this.indexer.isIndexable(file)) {
 					this.pendingUpdates.set(file.path, file);
 					this.processPending();
 				}
@@ -54,13 +54,23 @@ export class IncrementalSync {
 
 		this.plugin.registerEvent(
 			this.plugin.app.vault.on("rename", (file, oldPath) => {
-				if (file instanceof TFile && file.extension === "md") {
+				if (file instanceof TFile) {
+					// The old path may have been indexed under any type; always
+					// remove it, then re-add the new path if it's still indexable.
 					void this.index.removeDocument(oldPath);
-					this.pendingUpdates.set(file.path, file);
-					this.processPending();
+					if (this.indexer.isIndexable(file)) {
+						this.pendingUpdates.set(file.path, file);
+						this.processPending();
+					}
 				}
 			}),
 		);
+	}
+
+	/** Cancel any pending debounced flush (call on plugin unload). */
+	cancel(): void {
+		this.processPending.cancel();
+		this.pendingUpdates.clear();
 	}
 
 	private async flushPendingUpdates(): Promise<void> {

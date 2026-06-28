@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type AISearchPlugin from "./main";
 
 export class AISearchSettingTab extends PluginSettingTab {
@@ -132,6 +132,81 @@ export class AISearchSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.indexOnStartup = value;
 						await this.plugin.saveSettings();
+					}),
+			);
+
+		// ── File types ──
+		new Setting(containerEl).setName("File types").setHeading();
+
+		const fileTypeNotice =
+			"Newly added or edited files are picked up automatically. " +
+			"Run the \"Re-index vault\" command to apply this to existing files.";
+
+		// Saves, refreshes the live indexer options, and reminds the user that a
+		// re-index is needed for files already in the vault.
+		const onFileTypeChange = async (): Promise<void> => {
+			await this.plugin.saveSettings();
+			this.plugin.refreshIndexerOptions();
+			new Notice(`Lightning Local Search: ${fileTypeNotice}`);
+		};
+
+		new Setting(containerEl)
+			.setName("Index plain-text files")
+			.setDesc(
+				"Index .txt, .csv, .json, .xml, .yaml and similar text files.",
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.indexPlainText)
+					.onChange(async (value) => {
+						this.plugin.settings.indexPlainText = value;
+						await onFileTypeChange();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Index canvas files")
+			.setDesc("Index text and labels from Obsidian canvas files.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.indexCanvas)
+					.onChange(async (value) => {
+						this.plugin.settings.indexCanvas = value;
+						await onFileTypeChange();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Index PDF files")
+			.setDesc(
+				"Extract and index the text layer of PDFs. Scanned PDFs without " +
+					"a text layer can't be indexed. Disabled on mobile. " +
+					"Increases memory use on large libraries.",
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.indexPdf)
+					.onChange(async (value) => {
+						this.plugin.settings.indexPdf = value;
+						await onFileTypeChange();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Maximum file size")
+			.setDesc(
+				"Skip text/canvas/PDF files larger than this (MB) when " +
+					"extracting. Does not apply to markdown notes.",
+			)
+			.addSlider((slider) =>
+				slider
+					.setLimits(1, 50, 1)
+					.setValue(this.plugin.settings.maxIndexFileSizeMB)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.maxIndexFileSizeMB = value;
+						await this.plugin.saveSettings();
+						this.plugin.refreshIndexerOptions();
 					}),
 			);
 

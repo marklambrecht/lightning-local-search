@@ -9,7 +9,27 @@ export const COMMAND_IDS = {
 	reindex: "reindex-vault",
 } as const;
 
-export const INDEX_SCHEMA_VERSION = 2;
+// Bumped to 3 when non-markdown files (plain text, canvas, PDF) were added to
+// the index — older caches lack a `fileType` field and must be rebuilt.
+export const INDEX_SCHEMA_VERSION = 3;
+
+/**
+ * Extensions indexed as plain text (read verbatim, no markdown stripping and
+ * no metadata cache). Source-code extensions are deliberately omitted to avoid
+ * surprising users with huge indexes; markdown and canvas are handled
+ * separately, and PDFs go through the dedicated extractor.
+ */
+export const PLAINTEXT_EXTENSIONS = new Set([
+	"txt", "text", "csv", "tsv", "log",
+	"json", "jsonc", "xml", "yaml", "yml", "ini", "toml",
+]);
+
+/**
+ * Hard cap on extracted text stored per non-markdown document. A 5 MB PDF or
+ * text file can yield millions of characters; storing that verbatim in the
+ * in-memory index would dwarf typical notes, so we truncate.
+ */
+export const MAX_EXTRACTED_CHARS = 500_000;
 
 export const DEFAULT_SETTINGS: AISearchSettings = {
 	maxResults: 20,
@@ -20,6 +40,10 @@ export const DEFAULT_SETTINGS: AISearchSettings = {
 	excludedFolders: [],
 	excludedTags: [],
 	indexOnStartup: true,
+	indexPlainText: true,
+	indexCanvas: true,
+	indexPdf: false,
+	maxIndexFileSizeMB: 5,
 	enableEmbeddings: false,
 	embeddingModel: "Xenova/all-MiniLM-L6-v2",
 	embeddingBatchSize: 10,

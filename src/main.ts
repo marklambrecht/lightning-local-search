@@ -3,7 +3,7 @@ import type { AISearchSettings } from "./types";
 import { COMMAND_IDS, DEFAULT_SETTINGS, VIEW_TYPE_AI_SEARCH } from "./constants";
 import { AISearchSettingTab } from "./settings";
 import { OramaIndex } from "./indexer/orama-index";
-import { VaultIndexer } from "./indexer/vault-indexer";
+import { VaultIndexer, type FileTypeOptions } from "./indexer/vault-indexer";
 import { IncrementalSync } from "./indexer/incremental-sync";
 import { IndexStore } from "./storage/index-store";
 import { CacheManager } from "./storage/cache-manager";
@@ -84,6 +84,7 @@ export default class AISearchPlugin extends Plugin {
 			void this.cacheManager?.persistIndex();
 		}
 
+		this.incrementalSync?.cancel();
 		this.incrementalSync = undefined as unknown as IncrementalSync;
 		this.embeddingWorker?.cancel();
 		this.embeddingService?.dispose();
@@ -101,11 +102,34 @@ export default class AISearchPlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
+	/** Builds the indexer's file-type options from the current settings. */
+	private fileTypeOptions(): FileTypeOptions {
+		return {
+			plainText: this.settings.indexPlainText,
+			canvas: this.settings.indexCanvas,
+			pdf: this.settings.indexPdf,
+			maxFileSizeBytes: Math.max(0, this.settings.maxIndexFileSizeMB) * 1024 * 1024,
+		};
+	}
+
+	/**
+	 * Pushes the latest exclusion and file-type settings into the indexer.
+	 * New/changed files are picked up immediately by incremental sync; existing
+	 * files require a re-index (callers should prompt for one when needed).
+	 */
+	refreshIndexerOptions(): void {
+		if (!this.vaultIndexer) return;
+		this.vaultIndexer.updateExcludedFolders(this.settings.excludedFolders);
+		this.vaultIndexer.updateExcludedTags(this.settings.excludedTags);
+		this.vaultIndexer.updateFileTypes(this.fileTypeOptions());
+	}
+
 	private async initializeServices(): Promise<void> {
 		this.vaultIndexer = new VaultIndexer(
 			this.app,
 			this.settings.excludedFolders,
 			this.settings.excludedTags,
+			this.fileTypeOptions(),
 		);
 		this.indexStore = new IndexStore();
 

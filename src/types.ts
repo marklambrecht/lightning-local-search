@@ -11,6 +11,14 @@ export interface AISearchSettings {
 	excludedFolders: string[];
 	excludedTags: string[];
 	indexOnStartup: boolean;
+	/** Index plain-text files (.txt, .csv, .json, …) in addition to markdown */
+	indexPlainText: boolean;
+	/** Index Obsidian canvas files (extracts text/label nodes) */
+	indexCanvas: boolean;
+	/** Index PDF files (extracts the embedded text layer) */
+	indexPdf: boolean;
+	/** Skip files larger than this size (MB) when extracting text */
+	maxIndexFileSizeMB: number;
 
 	// Embeddings (Phase 4)
 	enableEmbeddings: boolean;
@@ -59,6 +67,9 @@ export interface IndexedNote {
 	/** Vector embedding (Phase 4 — 384 dimensions for MiniLM) */
 	embedding?: number[];
 }
+
+/** The kind of file a document was indexed from */
+export type FileType = "markdown" | "plaintext" | "canvas" | "pdf";
 
 // ─── Search ─────────────────────────────────────────────────────────
 export interface ParsedQuery {
@@ -115,6 +126,8 @@ export interface SearchResult {
 	createdAt: string;
 	/** File modification date */
 	modifiedAt: string;
+	/** The kind of file this result came from */
+	fileType: FileType;
 	/** Positions of matches for highlighting */
 	highlights: HighlightRange[];
 }

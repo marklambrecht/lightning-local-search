@@ -9,7 +9,7 @@ import {
 	type AnyOrama,
 	type RawData,
 } from "@orama/orama";
-import type { ParsedQuery, SearchResult } from "../types";
+import type { FileType, ParsedQuery, SearchResult } from "../types";
 import { generatePreviewExcerpt } from "../utils/text-processing";
 
 const SCHEMA = {
@@ -20,6 +20,7 @@ const SCHEMA = {
 	path: "enum" as const,
 	tags: "enum[]" as const,
 	folder: "enum" as const,
+	fileType: "enum" as const,
 	createdAt: "number" as const,
 	modifiedAt: "number" as const,
 };
@@ -33,6 +34,7 @@ interface OramaDocument {
 	path: string;
 	tags: string[];
 	folder: string;
+	fileType: FileType;
 	createdAt: number;
 	modifiedAt: number;
 }
@@ -47,6 +49,7 @@ export interface IndexableDocument {
 	createdAt: number;
 	modifiedAt: number;
 	frontmatter: string;
+	fileType: FileType;
 }
 
 export class OramaIndex {
@@ -102,6 +105,7 @@ export class OramaIndex {
 			path: doc.path,
 			tags: doc.tags,
 			folder: doc.folder,
+			fileType: doc.fileType,
 			createdAt: doc.createdAt,
 			modifiedAt: doc.modifiedAt,
 		};
@@ -413,6 +417,7 @@ export class OramaIndex {
 				excerpt: generatePreviewExcerpt(doc.content, excerptLength),
 				matchedTags: doc.tags,
 				folder: doc.folder,
+				fileType: doc.fileType ?? "markdown",
 				createdAt: new Date(doc.createdAt).toISOString(),
 				modifiedAt: new Date(doc.modifiedAt).toISOString(),
 				highlights: [],

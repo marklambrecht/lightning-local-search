@@ -272,6 +272,18 @@
 	margin-top: 4px;
 }
 
+.ai-search-result-filetype {
+	display: inline-block;
+	margin-right: 6px;
+	padding: 0 5px;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: var(--font-smallest);
+	font-weight: var(--font-semibold);
+	letter-spacing: 0.03em;
+}
+
 .ai-search-highlight {
 	background-color: #e6b800;
 	color: var(--text-normal);

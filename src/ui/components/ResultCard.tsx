@@ -115,6 +115,11 @@ export function ResultCard({
 				</div>
 			)}
 			<div class="ai-search-result-meta">
+				{result.fileType !== "markdown" && (
+					<span class="ai-search-result-filetype">
+						{result.fileType.toUpperCase()}
+					</span>
+				)}
 				Modified: {new Date(result.modifiedAt).toLocaleDateString()}
 			</div>
 		</div>
