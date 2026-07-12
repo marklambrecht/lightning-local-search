@@ -50,12 +50,14 @@ src/
 
   ui/
     search-modal.ts            # Quick-search modal (extends SuggestModal)
-    search-view.ts             # Sidebar view container (extends ItemView)
-    search-view-root.tsx       # Main Preact component (state, search, AI logic)
+    search-view.ts             # View container (extends ItemView); detects tab vs sidebar mode
+    search-view-root.tsx       # Main Preact component (state, search, grouping, preview, AI)
     components/
       SearchInput.tsx          # Input field with loading spinner
       ResultCard.tsx           # Individual result card with term highlighting
-      ResultList.tsx           # Result list container
+      ResultList.tsx           # Flat result list container (legacy; ResultGroups is the active renderer)
+      ResultGroups.tsx         # Collapsible grouped/flat result renderer (group by folder/type/date)
+      PreviewPane.tsx          # Tab-mode inline note preview with match highlighting
       AISummary.tsx            # AI response display
       ProgressBar.tsx          # Indexing progress indicator
 
@@ -78,10 +80,18 @@ src/
 
 **Search flow:**
 1. User types in `SearchInput` → debounced 300ms
-2. Query parsed by `parseQuery()` → extracts text, tags, paths, dates
-3. `oramaIndex.search()` returns ranked `SearchResult[]`
-4. `ResultList` renders `ResultCard` components with highlighted terms
-5. Hovering a card triggers Obsidian's `hover-link` event for page preview
+2. Query parsed by `parseQuery()` → extracts text, tags, paths, dates, and Boolean
+   `orGroups` (from `a OR b` / `(a OR b)` / `a | b`)
+3. `oramaIndex.search()` returns ranked `SearchResult[]`; a per-document lowercased
+   haystack cache (keyed by path + `modifiedAt`) avoids re-scanning on every keystroke,
+   and excerpts are centered on the first match
+4. `ResultGroups` renders `ResultCard` components (optionally grouped) with highlighted terms
+5. Hovering a card triggers Obsidian's `hover-link` event; in **tab mode** the selected
+   result also renders live in `PreviewPane`
+
+**Tab vs sidebar:** `search-view.ts` compares `leaf.getRoot()` to `workspace.rootSplit` to
+pick a `mode` (`"tab"` = wide two-pane power layout with inline preview; `"sidebar"` =
+compact single column) and re-renders on `layout-change` when the view is dragged between them.
 
 **AI flow:**
 1. User edits question in textarea (pre-filled with search query)

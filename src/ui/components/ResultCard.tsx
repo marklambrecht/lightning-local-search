@@ -8,6 +8,7 @@ interface ResultCardProps {
 	excerptLines: number;
 	isSelected: boolean;
 	onClick: (e: MouseEvent) => void;
+	onDoubleClick?: (e: MouseEvent) => void;
 	onHover: (event: MouseEvent, targetEl: HTMLElement, path: string) => void;
 }
 
@@ -44,6 +45,7 @@ export function ResultCard({
 	excerptLines,
 	isSelected,
 	onClick,
+	onDoubleClick,
 	onHover,
 }: ResultCardProps) {
 	const classes = `ai-search-result-card${isSelected ? " ai-search-result-selected" : ""}`;
@@ -51,6 +53,7 @@ export function ResultCard({
 		<div
 			class={classes}
 			onClick={(e) => onClick(e as unknown as MouseEvent)}
+			onDblClick={(e) => onDoubleClick?.(e as unknown as MouseEvent)}
 			role="button"
 			tabIndex={0}
 			onKeyDown={(e) => {

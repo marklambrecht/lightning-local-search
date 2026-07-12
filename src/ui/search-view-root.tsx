@@ -10,7 +10,8 @@ import { ClaudeClient } from "../claude/claude-client";
 import { ConsentManager } from "../claude/consent-manager";
 import { highlightAndScrollToMatch } from "../utils/editor-highlight";
 import { SearchInput } from "./components/SearchInput";
-import { ResultList } from "./components/ResultList";
+import { ResultGroups, type ResultGroup } from "./components/ResultGroups";
+import { PreviewPane } from "./components/PreviewPane";
 import { ProgressBar } from "./components/ProgressBar";
 import { AISummary } from "./components/AISummary";
 
@@ -24,13 +25,60 @@ function ObsidianIcon({ icon }: { icon: string }) {
 	return <span ref={ref} class="ai-search-icon" />;
 }
 
+export type SearchViewMode = "tab" | "sidebar";
+
+const DATE_BUCKET_ORDER = ["today", "week", "month", "older"];
+
+/** Buckets a modification date into a coarse recency band for grouping. */
+function dateBucket(iso: string): string {
+	const t = new Date(iso).getTime();
+	if (Number.isNaN(t)) return "older";
+	const now = new Date();
+	const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+	const day = 86_400_000;
+	if (t >= start) return "today";
+	if (t >= start - 6 * day) return "week";
+	if (t >= start - 29 * day) return "month";
+	return "older";
+}
+
+function groupKey(groupBy: string, r: SearchResult): string {
+	if (groupBy === "folder") return r.folder || "(vault root)";
+	if (groupBy === "filetype") return r.fileType;
+	if (groupBy === "date") return dateBucket(r.modifiedAt);
+	return "all";
+}
+
+function groupLabel(groupBy: string, key: string): string {
+	if (groupBy === "filetype") {
+		const labels: Record<string, string> = {
+			markdown: "Markdown",
+			plaintext: "Plain text",
+			canvas: "Canvas",
+			pdf: "PDF",
+		};
+		return labels[key] ?? key;
+	}
+	if (groupBy === "date") {
+		const labels: Record<string, string> = {
+			today: "Today",
+			week: "This week",
+			month: "This month",
+			older: "Older",
+		};
+		return labels[key] ?? key;
+	}
+	return key;
+}
+
 interface SearchViewRootProps {
 	plugin: AISearchPlugin;
 	app: App;
 	view: AISearchView;
+	mode: SearchViewMode;
 }
 
-export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
+export function SearchViewRoot({ plugin, app, view, mode }: SearchViewRootProps) {
 	const [state, setState] = useState<SearchViewState>({
 		query: "",
 		results: [],
@@ -45,6 +93,7 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 	const [isAskingAI, setIsAskingAI] = useState(false);
 	const [aiQuestion, setAiQuestion] = useState("");
 	const [sortOrder, setSortOrder] = useState("modified-new");
+	const [groupBy, setGroupBy] = useState("none");
 	const [caseSensitive, setCaseSensitive] = useState(false);
 	const [selectedIndex, setSelectedIndex] = useState(-1);
 	const [showHistory, setShowHistory] = useState(false);
@@ -56,6 +105,9 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 	const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const inputRef = useRef<HTMLInputElement>(null);
 	const targetLeafRef = useRef<WorkspaceLeaf | null>(null);
+	// Mirrors the flattened display order so click handlers can resolve a
+	// result's index without depending on a value declared later in render.
+	const displayResultsRef = useRef<SearchResult[]>([]);
 
 	// Auto-focus the search input when the view opens
 	useEffect(() => {
@@ -204,6 +256,14 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 				}
 			}
 		}
+		// Highlight every alternative from OR groups too.
+		for (const alts of parsed.orGroups) {
+			for (const word of alts) {
+				if (word.length > 0 && !terms.includes(word)) {
+					terms.push(word);
+				}
+			}
+		}
 		return terms;
 	}, [state.query]);
 
@@ -245,6 +305,23 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 	const handleResultClick = useCallback(
 		(result: SearchResult, e: MouseEvent) => {
 			const newTab = e.ctrlKey || e.metaKey || e.button === 1;
+			// In tab mode a plain click just selects the result and updates the
+			// preview pane; opening happens via double-click, Enter, or a
+			// modifier/middle click. In the sidebar a plain click opens.
+			if (mode === "tab" && !newTab) {
+				const idx = displayResultsRef.current.indexOf(result);
+				if (idx >= 0) setSelectedIndex(idx);
+				return;
+			}
+			addToHistory(state.query);
+			void openResultWithHighlight(result.path, newTab);
+		},
+		[openResultWithHighlight, addToHistory, state.query, mode],
+	);
+
+	const handleResultDoubleClick = useCallback(
+		(result: SearchResult, e: MouseEvent) => {
+			const newTab = e.ctrlKey || e.metaKey;
 			addToHistory(state.query);
 			void openResultWithHighlight(result.path, newTab);
 		},
@@ -321,8 +398,7 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 				setSelectedIndex((prev) => Math.max(prev - 1, -1));
 			} else if (e.key === "Enter" && selectedIndex >= 0) {
 				e.preventDefault();
-				const sorted = sortedResults;
-				const result = sorted[selectedIndex];
+				const result = displayResults[selectedIndex];
 				if (result) {
 					addToHistory(state.query);
 					const newTab = e.ctrlKey || e.metaKey;
@@ -559,6 +635,59 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 		return sorted;
 	}, [state.results, sortOrder]);
 
+	// Partition the sorted results into groups. Group order is preserved from the
+	// sorted order, except date buckets follow a fixed recency order.
+	const groups = useMemo<ResultGroup[]>(() => {
+		if (groupBy === "none") {
+			return [{ key: "all", label: "All results", results: sortedResults }];
+		}
+
+		const map = new Map<string, SearchResult[]>();
+		const order: string[] = [];
+		for (const r of sortedResults) {
+			const key = groupKey(groupBy, r);
+			let bucket = map.get(key);
+			if (!bucket) {
+				bucket = [];
+				map.set(key, bucket);
+				order.push(key);
+			}
+			bucket.push(r);
+		}
+
+		if (groupBy === "date") {
+			order.sort((a, b) => DATE_BUCKET_ORDER.indexOf(a) - DATE_BUCKET_ORDER.indexOf(b));
+		}
+
+		return order.map((key) => ({
+			key,
+			label: groupLabel(groupBy, key),
+			results: map.get(key) ?? [],
+		}));
+	}, [sortedResults, groupBy]);
+
+	// Flattened order matching what is rendered top-to-bottom; keyboard
+	// navigation (selectedIndex) and the preview pane index into this.
+	const displayResults = useMemo(
+		() => groups.flatMap((g) => g.results),
+		[groups],
+	);
+	displayResultsRef.current = displayResults;
+
+	const selectedResult =
+		selectedIndex >= 0 && selectedIndex < displayResults.length
+			? displayResults[selectedIndex]
+			: null;
+
+	// In tab mode, auto-select the first result whenever a new result set
+	// arrives so the preview pane isn't blank. Re-runs only on results change,
+	// so pressing Escape (which sets -1) is respected until the next search.
+	useEffect(() => {
+		if (mode === "tab" && state.results.length > 0) {
+			setSelectedIndex(0);
+		}
+	}, [state.results, mode]);
+
 	const showAIButton =
 		plugin.settings.enableAI &&
 		plugin.settings.claudeApiKey.length > 0 &&
@@ -567,7 +696,10 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 	const canPin = state.query.trim().length > 0 && !plugin.settings.pinnedQueries.includes(state.query.trim());
 
 	return (
-		<div class="ai-search-container" onKeyDown={handleKeyDown}>
+		<div
+			class={`ai-search-container${mode === "tab" ? " ai-search-tab" : ""}`}
+			onKeyDown={handleKeyDown}
+		>
 			<SearchInput
 				value={state.query}
 				onInput={handleInputChange}
@@ -675,6 +807,8 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 					<div class="ai-search-syntax-row"><code>section:</code> search keywords under same heading</div>
 					<div class="ai-search-syntax-row"><code>[property]</code> match property</div>
 					<div class="ai-search-syntax-row"><code>"exact phrase"</code> exact phrase match</div>
+					<div class="ai-search-syntax-row"><code>a OR b</code> match either term</div>
+					<div class="ai-search-syntax-row"><code>(a OR b) c</code> grouped OR, combined with c</div>
 					<div class="ai-search-syntax-row"><code>-word</code> exclude word</div>
 					<div class="ai-search-syntax-row"><code>created:&gt;date</code> created after date</div>
 					<div class="ai-search-syntax-row"><code>modified:&lt;date</code> modified before date</div>
@@ -734,6 +868,19 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 						<option value="created-new">Created time (new to old)</option>
 						<option value="created-old">Created time (old to new)</option>
 					</select>
+					<select
+						class="ai-search-group-select"
+						value={groupBy}
+						title="Group results"
+						onChange={(e) =>
+							setGroupBy((e.target as HTMLSelectElement).value)
+						}
+					>
+						<option value="none">No grouping</option>
+						<option value="folder">Group by folder</option>
+						<option value="filetype">Group by file type</option>
+						<option value="date">Group by modified date</option>
+					</select>
 				</div>
 			)}
 
@@ -773,15 +920,35 @@ export function SearchViewRoot({ plugin, app, view }: SearchViewRootProps) {
 				</div>
 			)}
 
-			<ResultList
-				results={sortedResults}
-				showScores={plugin.settings.showScores}
-				searchTerms={searchTerms}
-				excerptLines={plugin.settings.excerptLines}
-				selectedIndex={selectedIndex}
-				onResultClick={handleResultClick}
-				onResultHover={handleResultHover}
-			/>
+			<div class="ai-search-body">
+				<div class="ai-search-list-pane">
+					<ResultGroups
+						groups={groups}
+						grouped={groupBy !== "none"}
+						showScores={plugin.settings.showScores}
+						searchTerms={searchTerms}
+						excerptLines={plugin.settings.excerptLines}
+						selectedIndex={selectedIndex}
+						onResultClick={handleResultClick}
+						onResultDoubleClick={handleResultDoubleClick}
+						onResultHover={handleResultHover}
+					/>
+				</div>
+				{mode === "tab" && state.results.length > 0 && (
+					<div class="ai-search-preview-pane">
+						<PreviewPane
+							app={app}
+							owner={view}
+							result={selectedResult ?? null}
+							searchTerms={searchTerms}
+							onOpen={(path, newTab) => {
+								addToHistory(state.query);
+								void openResultWithHighlight(path, newTab);
+							}}
+						/>
+					</div>
+				)}
+			</div>
 		</div>
 	);
 }

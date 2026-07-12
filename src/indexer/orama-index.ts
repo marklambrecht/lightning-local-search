@@ -10,7 +10,7 @@ import {
 	type RawData,
 } from "@orama/orama";
 import type { FileType, ParsedQuery, SearchResult } from "../types";
-import { generatePreviewExcerpt } from "../utils/text-processing";
+import { generateExcerpt, generatePreviewExcerpt } from "../utils/text-processing";
 
 const SCHEMA = {
 	title: "string" as const,
@@ -57,12 +57,20 @@ export class OramaIndex {
 	private pathToId = new Map<string, string>();
 	private knownTags = new Set<string>();
 	private knownFolders = new Set<string>();
+	/**
+	 * Per-document lowercased `title + content + headings` haystack, keyed by
+	 * path and validated by `modifiedAt`. Post-filters run this on every
+	 * keystroke over a large candidate pool; caching avoids re-lowercasing big
+	 * note bodies each time. Invalidated on upsert/remove.
+	 */
+	private haystackCache = new Map<string, { mod: number; lower: string }>();
 
 	async initialize(): Promise<void> {
 		this.db = await create({ schema: SCHEMA, language: "english" });
 		this.pathToId.clear();
 		this.knownTags.clear();
 		this.knownFolders.clear();
+		this.haystackCache.clear();
 	}
 
 	async loadFromSnapshot(raw: RawData, pathMap: Record<string, string>): Promise<void> {
@@ -86,6 +94,9 @@ export class OramaIndex {
 		// Track known tags and folders for auto-suggest
 		for (const tag of doc.tags) this.knownTags.add(tag);
 		if (doc.folder) this.knownFolders.add(doc.folder);
+
+		// Content may have changed — drop the cached haystack for this path.
+		this.haystackCache.delete(doc.path);
 
 		// Remove existing if present
 		const existingId = this.pathToId.get(doc.path);
@@ -116,6 +127,7 @@ export class OramaIndex {
 
 	async removeDocument(path: string): Promise<void> {
 		if (!this.db) return;
+		this.haystackCache.delete(path);
 		const id = this.pathToId.get(path);
 		if (id) {
 			try {
@@ -139,6 +151,7 @@ export class OramaIndex {
 		const hasHeadingTerms = query.headingTerms.length > 0;
 		const hasLineQueries = query.lineQueries.length > 0;
 		const hasSectionQueries = query.sectionQueries.length > 0;
+		const hasOrGroups = query.orGroups.length > 0;
 		const hasFrontmatter = Object.keys(query.frontmatter).length > 0;
 
 		// Build Orama where clause (tags + dates only; paths use post-filter)
@@ -167,6 +180,7 @@ export class OramaIndex {
 		const extraTerms: string[] = [];
 		if (hasLineQueries) extraTerms.push(...query.lineQueries.flat());
 		if (hasSectionQueries) extraTerms.push(...query.sectionQueries.flat());
+		if (hasOrGroups) extraTerms.push(...query.orGroups.flat());
 		if (hasFileTerms) extraTerms.push(...query.fileTerms);
 		if (hasHeadingTerms) extraTerms.push(...query.headingTerms);
 		if (extraTerms.length > 0) {
@@ -225,6 +239,16 @@ export class OramaIndex {
 			...query.phrases.flatMap((p) => p.split(/\s+/)),
 		].filter((w) => w.length > 0);
 
+		// Terms used to center each result's excerpt on the first match, so the
+		// snippet shows WHY the note matched (phrases kept whole for precision).
+		const excerptNeedles = [
+			...query.phrases,
+			...allQueryWords,
+			...query.orGroups.flat(),
+		]
+			.map((w) => w.toLowerCase())
+			.filter((w) => w.length > 0);
+
 		// All post-filters below enforce AND semantics, so a hit must satisfy
 		// every active one. Running them as separate passes meant rebuilding and
 		// re-lowercasing the full `title + content + headings` haystack (the note
@@ -265,6 +289,11 @@ export class OramaIndex {
 					terms.map((t) => (caseSensitive ? t : t.toLowerCase())),
 				)
 			: [];
+		const orNeedles = hasOrGroups
+			? query.orGroups.map((alts) =>
+					alts.map((a) => (caseSensitive ? a : a.toLowerCase())),
+				)
+			: [];
 		const frontmatterEntries = hasFrontmatter
 			? Object.entries(query.frontmatter).map(
 					([k, v]) => [k.toLowerCase(), v.toLowerCase()] as const,
@@ -274,23 +303,40 @@ export class OramaIndex {
 		const needsPostFilter = andActive || hasPaths || hasPhrases
 			|| caseTextTerms.length > 0 || hasExcludedTerms || hasExcludedTags
 			|| hasFileTerms || hasHeadingTerms || hasLineQueries
-			|| hasSectionQueries || hasFrontmatter;
+			|| hasSectionQueries || hasOrGroups || hasFrontmatter;
 
 		if (needsPostFilter) {
 			hits = hits.filter((hit) => {
 				const doc = hit.document as unknown as OramaDocument;
 
-				// Build the title+content+headings haystack once per hit; the
-				// lowercased form is computed at most once and only when needed.
-				const rawHaystack = `${doc.title} ${doc.content} ${doc.headings.join(" ")}`;
-				let lowerHaystack: string | null = null;
-				const lower = () =>
-					(lowerHaystack ??= rawHaystack.toLowerCase());
+				// Raw haystack is only needed for case-sensitive checks; build it
+				// lazily. The lowercased form is cached across searches (keyed by
+				// path + modifiedAt) so big note bodies aren't re-lowercased on
+				// every keystroke.
+				let rawHaystack: string | null = null;
+				const raw = () =>
+					(rawHaystack ??= `${doc.title} ${doc.content} ${doc.headings.join(" ")}`);
+				const lower = () => {
+					const cached = this.haystackCache.get(doc.path);
+					if (cached && cached.mod === doc.modifiedAt) return cached.lower;
+					const value = raw().toLowerCase();
+					this.haystackCache.set(doc.path, { mod: doc.modifiedAt, lower: value });
+					return value;
+				};
 
 				// AND semantics: every query word must appear somewhere.
 				if (andActive) {
-					const hay = caseSensitive ? rawHaystack : lower();
+					const hay = caseSensitive ? raw() : lower();
 					if (!andNeedles.every((w) => hay.includes(w))) return false;
+				}
+
+				// OR groups: each group needs at least one alternative present.
+				if (hasOrGroups) {
+					const hay = caseSensitive ? raw() : lower();
+					const ok = orNeedles.every((alts) =>
+						alts.some((a) => hay.includes(a)),
+					);
+					if (!ok) return false;
 				}
 
 				// Path prefix matching (supports subfolders).
@@ -311,14 +357,14 @@ export class OramaIndex {
 
 				// Exact phrase matches (whitespace collapsed).
 				if (hasPhrases) {
-					const collapsed = rawHaystack.replace(/\s+/g, " ");
+					const collapsed = raw().replace(/\s+/g, " ");
 					const searchable = caseSensitive ? collapsed : collapsed.toLowerCase();
 					if (!phraseNeedles.every((p) => searchable.includes(p))) return false;
 				}
 
 				// Case-sensitive matching for regular search terms.
 				if (caseTextTerms.length > 0) {
-					if (!caseTextTerms.every((term) => rawHaystack.includes(term))) return false;
+					if (!caseTextTerms.every((term) => raw().includes(term))) return false;
 				}
 
 				// Negated terms — exclude results containing these words.
@@ -414,7 +460,7 @@ export class OramaIndex {
 				title: doc.title,
 				score: hit.score,
 				scoreSource: "text" as const,
-				excerpt: generatePreviewExcerpt(doc.content, excerptLength),
+				excerpt: this.matchExcerpt(doc.content, excerptNeedles, excerptLength),
 				matchedTags: doc.tags,
 				folder: doc.folder,
 				fileType: doc.fileType ?? "markdown",
@@ -423,6 +469,24 @@ export class OramaIndex {
 				highlights: [],
 			};
 		});
+	}
+
+	/**
+	 * Builds a result excerpt centered on the first matching term so the snippet
+	 * shows the match in context. Falls back to a from-the-top preview when no
+	 * needle is found in the content (e.g. title-only or tag-only matches).
+	 */
+	private matchExcerpt(content: string, needles: string[], length: number): string {
+		if (needles.length > 0) {
+			const lc = content.toLowerCase();
+			let pos = -1;
+			for (const needle of needles) {
+				const i = lc.indexOf(needle);
+				if (i !== -1 && (pos === -1 || i < pos)) pos = i;
+			}
+			if (pos !== -1) return generateExcerpt(content, pos, length);
+		}
+		return generatePreviewExcerpt(content, length);
 	}
 
 	private buildWhereClause(query: ParsedQuery): Record<string, unknown> {

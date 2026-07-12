@@ -13,6 +13,8 @@ import { RESERVED_PREFIXES } from "../constants";
  *   -#tag            - exclude notes with tag
  *   -word            - exclude results containing word
  *   "exact phrase"   - exact phrase match
+ *   a OR b / a | b   - boolean OR (at least one alternative must match)
+ *   (a OR b) c       - grouped OR, AND-ed with the rest of the query
  *   title:term       - alias for file:
  *   heading:term     - filter by heading content
  *   folder:folder    - alias for path:
@@ -29,6 +31,7 @@ export function parseQuery(raw: string): ParsedQuery {
 	const headingTerms: string[] = [];
 	const lineQueries: string[][] = [];
 	const sectionQueries: string[][] = [];
+	const orGroups: string[][] = [];
 	const dateFilters: DateFilter[] = [];
 	const phrases: string[] = [];
 	const frontmatter: Record<string, string> = {};
@@ -155,6 +158,42 @@ export function parseQuery(raw: string): ParsedQuery {
 		return "";
 	});
 
+	// Extract Boolean OR / grouping. Only uppercase `OR` and the `|`/`||` symbols
+	// count as operators (matching Obsidian), so lowercase "or" stays free text.
+	// Runs after prefix operators so line:( )/section:( ) parens are already gone.
+	const OR_SPLIT = /\s+OR\s+|\s*\|\|?\s*/;
+
+	// Parenthesised groups: (a OR b), (a | b). A single-alternative group is just
+	// unwrapped back into the free text. Non-nested parens only.
+	text = text.replace(/\(([^()]*)\)/g, (_match, inner: string) => {
+		const alts = inner
+			.split(OR_SPLIT)
+			.map((a) => a.trim())
+			.filter((a) => a.length > 0);
+		if (alts.length >= 2) {
+			orGroups.push(alts);
+			return " ";
+		}
+		// No OR inside — unwrap the parentheses, keep the words as free text.
+		return ` ${inner} `;
+	});
+
+	// Bare OR sequences: foo OR bar, foo | bar | baz (no surrounding parens).
+	text = text.replace(
+		/[^\s()]+(?:\s+(?:OR|\|\|?)\s+[^\s()]+)+/g,
+		(match: string) => {
+			const alts = match
+				.split(OR_SPLIT)
+				.map((a) => a.trim())
+				.filter((a) => a.length > 0);
+			if (alts.length >= 2) {
+				orGroups.push(alts);
+				return " ";
+			}
+			return match;
+		},
+	);
+
 	// Extract negated terms: -word (must come after other prefix extractions)
 	text = text.replace(/(?:^|\s)-([a-zA-Z0-9_\-]+)/g, (_match, term: string) => {
 		excludedTerms.push(term);
@@ -175,6 +214,7 @@ export function parseQuery(raw: string): ParsedQuery {
 		headingTerms,
 		lineQueries,
 		sectionQueries,
+		orGroups,
 		frontmatter,
 		dateFilters,
 		useSemantic: false,

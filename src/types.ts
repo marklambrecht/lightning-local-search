@@ -93,6 +93,12 @@ export interface ParsedQuery {
 	lineQueries: string[][];
 	/** Section query: section:(term1 term2) — all terms under same heading */
 	sectionQueries: string[][];
+	/**
+	 * Boolean OR groups. Each inner array is a set of alternatives where at
+	 * least ONE must match (OR within a group); groups are AND-ed together and
+	 * with the rest of the query. Parsed from `a OR b`, `(a OR b) c`, `a | b`.
+	 */
+	orGroups: string[][];
 	/** Frontmatter filters: [property]:value or property:value */
 	frontmatter: Record<string, string>;
 	/** Date range filters */

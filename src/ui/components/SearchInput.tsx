@@ -17,7 +17,7 @@ export function SearchInput({ value, onInput, onClear, onFocus, onBlur, isSearch
 				ref={inputRef}
 				type="text"
 				class="ai-search-input"
-				placeholder="Search notes... (#tag, path:folder, &quot;phrase&quot;)"
+				placeholder="Search notes... (#tag, path:folder, &quot;phrase&quot;, a OR b)"
 				value={value}
 				onInput={(e) =>
 					onInput((e.target as HTMLInputElement).value)
